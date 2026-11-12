@@ -418,6 +418,47 @@ function wireSky() {
   });
 }
 
+// ---------- heart rate from a watch (Web Bluetooth: Chrome on Android)
+const HR = { dev: null, bpm: null, t: 0, max: 0, state: 'off', tries: 0 };
+const hasBle = () => !!(navigator.bluetooth && navigator.bluetooth.requestDevice);
+function hrUi() {
+  const pill = $('hrPill'), live = HR.state === 'on' && HR.bpm;
+  pill.hidden = HR.state === 'off';
+  pill.textContent = live ? '♥ ' + HR.bpm : HR.state === 'wait' ? '♥ …' : '♥ –';
+  const el = $('hrLine');
+  if (el) el.textContent = live ? HR.bpm + ' beats each minute now. Highest today: ' + HR.max + '.' : HR.state === 'wait' ? 'Connecting to the watch…' : HR.state === 'lost' ? 'The watch connection stopped. Touch Connect watch again.' : '';
+  const b = $('hrBtn'); if (b) b.textContent = HR.state === 'on' || HR.state === 'wait' ? 'Disconnect watch' : 'Connect watch';
+}
+async function hrLink() {
+  const srv = await HR.dev.gatt.connect();
+  const ch = await (await srv.getPrimaryService('heart_rate')).getCharacteristic('heart_rate_measurement');
+  ch.addEventListener('characteristicvaluechanged', e => {
+    const v = e.target.value, bpm = v.getUint8(0) & 1 ? v.getUint16(1, true) : v.getUint8(1);
+    if (bpm > 20 && bpm < 250) { HR.bpm = bpm; HR.t = Date.now(); HR.max = Math.max(HR.max, bpm); HR.state = 'on'; HR.tries = 0; hrUi(); }
+  });
+  await ch.startNotifications();
+}
+async function hrConnect() {
+  try {
+    HR.dev = await navigator.bluetooth.requestDevice({ filters: [{ services: ['heart_rate'] }] });
+    HR.state = 'wait'; hrUi();
+    HR.dev.addEventListener('gattserverdisconnected', async () => {
+      if (HR.state === 'off') return;
+      HR.bpm = null; HR.state = 'wait'; hrUi();
+      while (HR.state === 'wait' && HR.tries < 5) { // the watch went out of range: try again
+        HR.tries++; await new Promise(r => setTimeout(r, 4000));
+        try { await hrLink(); return; } catch (e) { /* try again */ }
+      }
+      if (HR.state === 'wait') { HR.state = 'lost'; hrUi(); }
+    });
+    await hrLink();
+  } catch (e) {
+    HR.state = HR.dev && e.name !== 'NotFoundError' ? 'lost' : 'off'; hrUi();
+    toast(e.name === 'NotFoundError' ? 'No watch selected. Start Broadcast Heart Rate on the watch first.' : 'The watch did not connect. Start Broadcast Heart Rate on the watch and try again.', 6000);
+  }
+}
+function hrDisconnect() { HR.state = 'off'; HR.bpm = null; try { HR.dev && HR.dev.gatt.disconnect(); } catch (e) { /* ignore */ } hrUi(); }
+
 // ---------- Track me panel
 let watchId = null, gpsMsg = '', wake = null, manualD = null, wantFly = false;
 const flyToMe = () => { const w = G.world(me); scene.flyTo({ x: w.x, z: w.z, dist: 38, polar: 1.0, dur: 1400 }); };
@@ -435,7 +476,9 @@ function setMe(lat, lon, acc, src, forceDay) {
     if (s.off < 1500 || src === 'manual') {
       const last = S.checkins[S.checkins.length - 1];
       if (src === 'manual' || !last || last.day !== ti || t - last.t > 40e3 || Math.abs(s.d - last.d) > 25) {
-        S.checkins.push({ t, lat: +lat.toFixed(5), lon: +lon.toFixed(5), day: ti, d: Math.round(s.d), src: src === 'manual' ? 'm' : 'g' });
+        const ci = { t, lat: +lat.toFixed(5), lon: +lon.toFixed(5), day: ti, d: Math.round(s.d), src: src === 'manual' ? 'm' : 'g' };
+        if (HR.bpm && t - HR.t < 15e3) ci.hr = HR.bpm;
+        S.checkins.push(ci);
         save(); drawWalked(); announceNear(day);
       }
     }
@@ -514,8 +557,13 @@ function renderTrack() {
     <div class="row" style="justify-content:space-between"><span class="num" id="manualTxt">${kmTxt(manualD)} km · ${Math.round(mp.ele)} m${nearPoi && Math.abs(nearPoi.d - manualD) < 400 ? ' · ' + esc(nearPoi.p.name) : ''}</span><button class="btn sea" id="checkin">Check in here</button></div>
     <h3 class="t">Save a moment</h3>
     <div class="row"><input class="txt" id="momentTxt" maxlength="80" placeholder="Dolphins from the jetty" aria-label="Note for this place"><button class="btn" id="momentBtn">Save</button></div>
+    <h3 class="t">Heart rate from a watch</h3>
+    ${hasBle() ? `<div class="row"><button class="btn" id="hrBtn">Connect watch</button><span class="fine num" id="hrLine" style="flex:1"></span></div>
+    <p class="fine">Garmin: start Broadcast Heart Rate on the watch (Settings, Sensors, Wrist Heart Rate), then touch Connect watch and select it. Broadcast uses more watch battery.</p>`
+    : '<p class="fine">Live heart rate needs Chrome on an Android phone and a watch that can broadcast heart rate with Bluetooth. This browser cannot do it.</p>'}
     <label class="chk" for="wake"><input type="checkbox" id="wake" ${wake ? 'checked' : ''}>Keep the screen on</label>
     <p class="fine">A web app records your position only while it is open on the screen. Open it at each stop. Replay joins your check-ins along the track. Check-ins stay on this phone.</p>`;
+  hrUi();
   if (oldTxt) $('momentTxt').value = oldTxt;
   if (hadFocus) { const el = $('momentTxt'); el.focus(); try { el.setSelectionRange(oldTxt.length, oldTxt.length); } catch (e) { /* ignore */ } }
 }
@@ -523,7 +571,8 @@ function wireTrack() {
   const p = $('p-track');
   p.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
-    if (b.id === 'gpsBtn') { if (watchId !== null) { stopGps(); S.gps = false; } else { wantFly = true; startGps(); S.gps = true; } save(); }
+    if (b.id === 'hrBtn') { HR.state === 'on' || HR.state === 'wait' ? hrDisconnect() : hrConnect(); }
+    else if (b.id === 'gpsBtn') { if (watchId !== null) { stopGps(); S.gps = false; } else { wantFly = true; startGps(); S.gps = true; } save(); }
     else if (b.id === 'findMe') flyToMe();
     else if (b.id === 'checkin') { const day = days[trackDay()], q = posOnDay(day, manualD); setMe(q.lat, q.lon, 0, 'manual', day.i); toast('Checked in at ' + kmTxt(manualD) + ' km'); }
     else if (b.id === 'momentBtn') {
@@ -759,6 +808,7 @@ function init() {
   buildStaticMarkers(); buildStopMarkers(); buildMomentMarkers(); drawRoutes(); updateHud(); buildTimebar();
   wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile();
   $('helpBtn').addEventListener('click', showHelp);
+  $('hrPill').addEventListener('click', () => setTab('track'));
   $('locBtn').addEventListener('click', () => {
     if (watchId === null) { wantFly = true; S.gps = true; save(); startGps(); toast('Looking for your position…', 4000); }
     else if (me && me.src !== 'manual' && G.inBounds(me.lat, me.lon)) flyToMe();

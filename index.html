@@ -204,6 +204,8 @@ input[type=range].plain::-moz-range-thumb{width:18px;height:18px;border-radius:5
 .legend span{display:inline-flex;align-items:center}
 #helpBtn{padding:6px 11px;border-radius:999px;background:var(--glass);border:1px solid rgba(255,125,92,.55);color:#ffc9bb;font-size:12px;font-weight:700;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 #card{max-height:46vh;overflow-y:auto}
+#hrPill{padding:6px 11px;border-radius:999px;background:var(--glass);border:1px solid rgba(249,168,200,.6);color:#ffd3e2;font-size:13px;font-weight:700;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+#hrPill[hidden]{display:none}
 @media (max-width:360px){.stats b{font-size:17px}.spot{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){#toast{transition:none}}
 </style>
@@ -227,6 +229,7 @@ input[type=range].plain::-moz-range-thumb{width:18px;height:18px;border-radius:5
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></svg>
     </button>
     <button id="helpBtn" aria-label="Help and phone numbers">Help</button>
+    <button id="hrPill" class="num" aria-label="Heart rate" hidden>♥ –</button>
   </div>
 </header>
 
