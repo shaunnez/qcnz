@@ -460,11 +460,29 @@ async function hrConnect() {
 function hrDisconnect() { HR.state = 'off'; HR.bpm = null; try { HR.dev && HR.dev.gatt.disconnect(); } catch (e) { /* ignore */ } hrUi(); }
 
 // ---------- Track me panel
-let watchId = null, gpsMsg = '', wake = null, manualD = null, wantFly = false;
+let watchId = null, gpsMsg = '', wake = null, manualD = null, wantFly = false, clearArmed = false;
+const BUILD = typeof __BUILD__ === 'string' ? __BUILD__ : 'dev';
+const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+async function updateApp() {
+  toast('Downloading the app again…', 8000);
+  try {
+    // Get all files from the network first. The stored copy changes only when all of them arrive.
+    const fresh = await Promise.all(SHELL.map(async u => { const r = await fetch(u, { cache: 'reload' }); if (!r.ok) throw new Error(u); return [new URL(u, location.href).href, r]; }));
+    if (window.caches) for (const k of await caches.keys()) { const c = await caches.open(k); for (const [u, r] of fresh) await c.put(u, r.clone()); }
+    try { const reg = await navigator.serviceWorker.getRegistration(); if (reg) reg.update(); } catch (e) { /* ignore */ }
+    toast('Done. The app starts again now.'); setTimeout(() => location.reload(), 900);
+  } catch (e) { toast('No connection. The app stays as it is. Try again when you have signal.', 6000); }
+}
+function clearDay(i) {
+  S.checkins = S.checkins.filter(c => c.day !== i);
+  for (const k of Object.keys(S.said)) if (k.startsWith(i + ':')) delete S.said[k];
+  me = null; manualD = null; save(); drawWalked(); drawMe(); scene.setGhost(null); renderAll();
+  toast('Day ' + (i + 1) + ' tracking is clear.' + (watchId !== null ? ' GPS is still on.' : ''), 4000);
+}
 const flyToMe = () => { const w = G.world(me); scene.flyTo({ x: w.x, z: w.z, dist: 38, polar: 1.0, dur: 1400 }); };
 const gpsUi = () => { $('locBtn').classList.toggle('on', watchId !== null); renderTrack(); };
 const trackDay = () => todayIndex() ?? sel;
-function setMe(lat, lon, acc, src, forceDay) {
+function setMe(lat, lon, acc, src, forceDay, speed) {
   const ti = forceDay ?? todayIndex(), t = Date.now();
   if (ti === null || ti === undefined) { // not a walk day: show the position only
     const s = G.nearestOnTrack(lat, lon);
@@ -472,8 +490,8 @@ function setMe(lat, lon, acc, src, forceDay) {
   } else {
     const day = days[ti], s = nearestOnDay(day, lat, lon);
     me = { lat, lon, acc, src, t, day: ti, d: s.d, off: s.off };
-    if (src === 'gps' && s.off < 1500) manualD = s.d;
-    if (s.off < 1500 || src === 'manual') {
+    if (src === 'gps' && s.off < 300) manualD = s.d;
+    if (src === 'manual' || (s.off < 300 && !(speed > 3.3))) { // not from a boat: near the route and at walk speed
       const last = S.checkins[S.checkins.length - 1];
       if (src === 'manual' || !last || last.day !== ti || t - last.t > 40e3 || Math.abs(s.d - last.d) > 25) {
         const ci = { t, lat: +lat.toFixed(5), lon: +lon.toFixed(5), day: ti, d: Math.round(s.d), src: src === 'manual' ? 'm' : 'g' };
@@ -499,7 +517,7 @@ function startGps() {
     watchId = navigator.geolocation.watchPosition(p => {
       const c = p.coords;
       if (c.accuracy > 200) { gpsMsg = 'GPS signal is weak (' + Math.round(c.accuracy) + ' m). Wait for a better fix.'; renderTrack(); return; }
-      gpsMsg = ''; setMe(c.latitude, c.longitude, c.accuracy, 'gps');
+      gpsMsg = ''; setMe(c.latitude, c.longitude, c.accuracy, 'gps', undefined, c.speed);
       if (wantFly) {
         wantFly = false;
         if (G.inBounds(me.lat, me.lon)) flyToMe(); else toast('You are outside this map, ' + Math.round(me.off / 1000) + ' km from the track.', 5000);
@@ -519,7 +537,7 @@ function stopGps(keepMsg) {
   watchId = null; if (!keepMsg) gpsMsg = ''; gpsUi();
 }
 function paceInfo(day) {
-  if (!me || me.day !== day.i || (me.off > 1500 && me.src !== 'manual')) return null;
+  if (!me || me.day !== day.i || (me.off > 300 && me.src !== 'manual')) return null;
   const now = Date.now(), rec = S.checkins.filter(c => c.day === day.i && now - c.t < 45 * 60e3 && now - c.t >= 0);
   let mph = null;
   if (rec.length >= 2) { const a = rec[0], b = rec[rec.length - 1]; if (b.t - a.t > 6 * 60e3 && b.d - a.d > 250) mph = (b.d - a.d) / ((b.t - a.t) / W.HOUR); }
@@ -533,7 +551,7 @@ function renderTrack() {
   let status;
   if (gpsMsg) status = gpsMsg;
   else if (me && me.day === null) status = me.off > 3000 ? 'You are ' + Math.round(me.off / 1000) + ' km from the track.' : 'You are at km ' + me.km.toFixed(1) + ' of the track.';
-  else if (me && me.day === day.i && me.off > 1500 && me.src !== 'manual') status = 'GPS is on. You are ' + (me.off / 1000).toFixed(1) + ' km from the route of day ' + (day.i + 1) + '. The map shows your position.';
+  else if (me && me.day === day.i && me.off > 300 && me.src !== 'manual') status = 'GPS is on. You are ' + (me.off < 1000 ? Math.round(me.off / 10) * 10 + ' m' : (me.off / 1000).toFixed(1) + ' km') + ' from the route of day ' + (day.i + 1) + '. The map shows your position. Nothing is recorded until you are on the route.';
   else if (me && me.day === day.i) status = (me.off > 300 && me.src !== 'manual' ? Math.round(me.off / 10) * 10 + ' m off the route. ' : 'On the route. ') + kmTxt(me.d) + ' km done, ' + kmTxt(day.dist - me.d) + ' km to ' + day.to.short + '.';
   else if (on) status = 'Tracking is on.';
   else if (!isToday) { const h = (DAY0 - Date.now()) / W.HOUR; status = h > 0 ? 'The walk starts in ' + (h > 48 ? Math.round(h / 24) + ' days.' : Math.round(h) + ' hours.') : 'The walk is complete. Open Replay to see it again.'; }
@@ -561,6 +579,9 @@ function renderTrack() {
     ${hasBle() ? `<div class="row"><button class="btn" id="hrBtn">Connect watch</button><span class="fine num" id="hrLine" style="flex:1"></span></div>
     <p class="fine">Garmin: start Broadcast Heart Rate on the watch (Settings, Sensors, Wrist Heart Rate), then touch Connect watch and select it. Broadcast uses more watch battery.</p>`
     : '<p class="fine">Live heart rate needs Chrome on an Android phone and a watch that can broadcast heart rate with Bluetooth. This browser cannot do it.</p>'}
+    <h3 class="t">Reset</h3>
+    <div class="btns"><button class="btn danger" id="clearDay">${clearArmed ? 'Touch again to clear day ' + (day.i + 1) : 'Clear day ' + (day.i + 1) + ' tracking'}</button><button class="btn" id="updBtn">Update app</button></div>
+    <p class="fine num">${S.checkins.filter(c => c.day === day.i).length} check-ins on day ${day.i + 1}. Clear removes them and the white walked line. Your notes stay. App version: ${BUILD}.</p>
     <label class="chk" for="wake"><input type="checkbox" id="wake" ${wake ? 'checked' : ''}>Keep the screen on</label>
     <p class="fine">A web app records your position only while it is open on the screen. Open it at each stop. Replay joins your check-ins along the track. Check-ins stay on this phone.</p>`;
   hrUi();
@@ -571,7 +592,10 @@ function wireTrack() {
   const p = $('p-track');
   p.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
-    if (b.id === 'hrBtn') { HR.state === 'on' || HR.state === 'wait' ? hrDisconnect() : hrConnect(); }
+    if (b.id !== 'clearDay' && clearArmed) clearArmed = false;
+    if (b.id === 'clearDay') { if (!clearArmed) { clearArmed = true; renderTrack(); } else { clearArmed = false; clearDay(trackDay()); } }
+    else if (b.id === 'updBtn') updateApp();
+    else if (b.id === 'hrBtn') { HR.state === 'on' || HR.state === 'wait' ? hrDisconnect() : hrConnect(); }
     else if (b.id === 'gpsBtn') { if (watchId !== null) { stopGps(); S.gps = false; } else { wantFly = true; startGps(); S.gps = true; } save(); }
     else if (b.id === 'findMe') flyToMe();
     else if (b.id === 'checkin') { const day = days[trackDay()], q = posOnDay(day, manualD); setMe(q.lat, q.lon, 0, 'manual', day.i); toast('Checked in at ' + kmTxt(manualD) + ' km'); }
@@ -674,6 +698,7 @@ function showHelp() {
   showCard({ kindHtml: badge('boat') + 'Help', title: 'If something goes wrong', fly: false,
     html: `<ul class="notes">${HELP.lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>
       <span class="facrow"><a class="btn pri" href="tel:111">Call 111</a> <a class="btn" href="tel:${HELP.office.replace(/ /g, '')}">Office ${HELP.office}</a></span>
+      <span class="facrow"><button class="btn" id="updBtn2">Update app</button> App version: ${BUILD}</span>
       <span class="facrow">Office from an overseas phone: ${HELP.officeIntl}. Luggage for the boat: 15 kg at most. There are no rubbish bins on the track: carry all waste out.</span>` });
 }
 
@@ -755,7 +780,7 @@ function renderReplay() {
     <div class="row"><button class="btn pri" id="rplay" style="min-width:84px">${R.playing ? 'Pause' : 'Play'}</button><input type="range" class="plain" id="rpos" min="0" max="1000" value="${Math.round(R.p / Math.max(R.segs.length, 1) * 1000)}" style="flex:1" aria-label="Position in the replay"></div>
     <p class="fine num" id="rinfo">${usingPlan ? 'There are no check-ins yet. Replay shows the plan.' : R.src === 'mine' ? nMine + ' check-ins on ' + daysMine + (daysMine === 1 ? ' day.' : ' days.') + ' Days without check-ins show the plan.' : 'The camera follows the planned walk. Sun and weather follow the forecast for each hour.'}</p>
     ${moments ? `<h3 class="t">Moments</h3><ol class="list">${moments}</ol>` : ''}
-    ${nMine || S.moments.length ? `<div class="btns"><button class="btn danger" id="wipe">${wipeArmed ? 'Touch again to delete' : 'Delete my check-ins and moments'}</button></div>` : ''}`;
+    <div class="btns"><button class="btn danger" id="wipe">${wipeArmed ? 'Touch again to delete' : 'Delete all my check-ins and moments'}</button></div>`;
 }
 function wireReplay() {
   const p = $('p-replay');
@@ -826,6 +851,7 @@ function init() {
   $('wxChip').addEventListener('click', () => setTab('sky'));
   $('compass').addEventListener('click', () => scene.resetNorth());
   $('cardClose').addEventListener('click', hideCard);
+  $('card').addEventListener('click', e => { if (e.target.id === 'updBtn2') updateApp(); });
   window.addEventListener('resize', layout);
   if (window.ResizeObserver) new ResizeObserver(layout).observe($('sheet'));
   document.addEventListener('visibilitychange', async () => {
