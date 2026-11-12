@@ -1,0 +1,9 @@
+{
+  "name": "qcnz",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/app.js --bundle --format=iife --minify --target=es2020 --outfile=../app.js && cp index.html sw.js manifest.webmanifest ../"
+  },
+  "dependencies": { "three": "0.160.0" },
+  "devDependencies": { "esbuild": "^0.25.0" }
+}
