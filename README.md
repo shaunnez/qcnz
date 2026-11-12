@@ -22,3 +22,6 @@ The app then works offline. The forecast updates when there is a connection.
 - Track line and places: OpenStreetMap contributors (ODbL).
 - Heights: Mapzen terrain tiles on AWS.
 - Forecast: Open-Meteo.
+- Section times, facilities and route notes: the Wilderness Guides Marlborough Sounds route guide, in my own words.
+
+GitHub Pages serves the `gh-pages` branch. Push each change to `main` and to `gh-pages`.

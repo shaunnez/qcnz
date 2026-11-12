@@ -1,5 +1,5 @@
 import * as G from './geo.js';
-import { STOPS, NIGHT_OPTIONS, DEFAULT_NIGHTS, POIS, LABELS, WILDLIFE } from './content.js';
+import { STOPS, NIGHT_OPTIONS, DEFAULT_NIGHTS, POIS, LABELS, WILDLIFE, GUIDE, HELP } from './content.js';
 import * as W from './weather.js';
 import { createScene, envFrom } from './scene.js';
 
@@ -7,21 +7,42 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const DAY0 = Date.parse('2026-11-13T00:00:00+13:00');
 const DAYCOLS = ['#ffb454', '#ff7d5c', '#f472b6', '#b79cff', '#6fe0ff'];
-const DEFAULT_STARTS = ['10:30', '09:00', '08:00', '08:00', '08:30'];
-const KEY = 'qct-2026-v2';
+const DEFAULT_STARTS = ['10:30', '09:00', '08:00', '08:30', '08:30'];
+const KEY = 'qct-2026-v3', OLD_KEY = 'qct-2026-v2';
 const KIND = {
   view: { label: 'Lookout', color: '#ffd27a', path: '<path d="M8 2 15 14H1z"/>' },
   history: { label: 'History', color: '#f9a8c8', path: '<path d="M8 1l7 7-7 7-7-7z"/>' },
   nature: { label: 'Nature', color: '#8ee6a0', path: '<circle cx="8" cy="8" r="6.5"/>' },
-  rest: { label: 'Rest stop', color: '#9fd0ff', path: '<rect x="2" y="2" width="12" height="12" rx="2.5"/>' }
+  rest: { label: 'Rest stop', color: '#9fd0ff', path: '<rect x="2" y="2" width="12" height="12" rx="2.5"/>' },
+  boat: { label: 'Water taxi', color: '#ff9c8f', path: '<path d="M1.5 9h13l-2.2 4.5H3.7zM8 8V2l4.5 6z"/>' }
 };
+// Facility badges, with the colours of the printed route guide.
+const FAC = {
+  lodge: { c: '#3d4a8f', label: 'Lodge', p: '<path d="M3.5 8 8 4l4.5 4v4.5h-9z" fill="#fff" stroke="none"/>' },
+  shelter: { c: '#4b4266', label: 'Shelter', p: '<path d="M3 8.2 8 4.5l5 3.7M5 8.5v4M11 8.5v4"/>' },
+  water: { c: '#2f7fd1', label: 'Drinking water', p: '<path d="M8 3.5c2 2.4 3 3.9 3 5.4a3 3 0 0 1-6 0c0-1.5 1-3 3-5.4z" fill="#fff" stroke="none"/>' },
+  toilet: { c: '#3f9a4a', label: 'Toilet', p: '<circle cx="5.8" cy="5" r="1.2" fill="#fff" stroke="none"/><circle cx="10.2" cy="5" r="1.2" fill="#fff" stroke="none"/><path d="M5.8 7.4v4.8M10.2 7.4v4.8" stroke-width="2"/>' },
+  picnic: { c: '#c9951c', label: 'Picnic place', p: '<path d="M4 6.5h8M5.5 6.5 4 12M10.5 6.5 12 12M3 9.3h10"/>' },
+  camp: { c: '#d0453c', label: 'Campsite', p: '<path d="M3 12 8 4l5 8z" fill="#fff" stroke="none"/>' },
+  view: { c: '#8e2f4f', label: 'Lookout', p: '<circle cx="5.6" cy="8.5" r="2.1"/><circle cx="10.4" cy="8.5" r="2.1"/>' },
+  boat: { c: '#c23b3b', label: 'Water taxi', p: '<path d="M3 9.5h10l-1.6 3H4.6z" fill="#fff" stroke="none"/><path d="M8 9V4l3 4"/>' }
+};
+const facInner = f => `<circle cx="8" cy="8" r="8" fill="${FAC[f].c}"/><g fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${FAC[f].p}</g>`;
+const badge = f => `<svg class="bdg" viewBox="0 0 16 16" role="img" aria-label="${FAC[f].label}">${facInner(f)}</svg>`;
+const badges = list => (list || []).map(badge).join('');
+const poiFac = p => (p.kind === 'view' ? ['view'] : p.kind === 'boat' ? ['boat'] : []).concat(p.fac || []);
 const glyph = k => `<svg viewBox="0 0 16 16" fill="${KIND[k].color}" stroke="#06181c" stroke-width="1.2">${KIND[k].path}</svg>`;
 const kmTxt = m => (m / 1000).toFixed(1);
-const durTxt = h => { const m = Math.round(h * 60); return Math.floor(m / 60) + ' h ' + W.p2(m % 60); };
+const durTxt = h => { const m = Math.round(h * 60); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + W.p2(m % 60); };
 
 // ---------- saved data (this device only)
-const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {} }, (() => {
-  try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; }
+const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {} }, (() => {
+  try {
+    const cur = localStorage.getItem(KEY);
+    if (cur) return JSON.parse(cur);
+    const old = JSON.parse(localStorage.getItem(OLD_KEY) || '{}'); // keep check-ins from the first version, take the new start times
+    delete old.starts; return old;
+  } catch (e) { return {}; }
 })());
 let saveTimer = 0;
 function save() {
@@ -62,15 +83,20 @@ function buildDays() {
       d += pts[k].km !== undefined && pts[k - 1].km !== undefined ? (pts[k].km - pts[k - 1].km) * 1000 : G.distM(pts[k - 1].lat, pts[k - 1].lon, pts[k].lat, pts[k].lon); pts[k].d = d;
       if (pts[k].ele - ref > 6) { up += pts[k].ele - ref; ref = pts[k].ele; } else if (ref - pts[k].ele > 6) ref = pts[k].ele;
     }
-    const hours = d / 4000 + up / 600, date = DAY0 + i * W.DAYMS;
+    const guide = GUIDE[seq[i] + '>' + seq[i + 1]] || null;
+    const hours = guide ? guide.h[1] : (d / 4000 + up / 600) * 1.2, date = DAY0 + i * W.DAYMS;
     const [sh, sm] = (S.starts[i] || '08:30').split(':').map(Number);
-    const tStart = date + (sh * 60 + sm) * 60e3, tEnd = tStart + hours * 1.12 * W.HOUR;
+    const tStart = date + (sh * 60 + sm) * 60e3, tEnd = tStart + hours * W.HOUR;
+    const [bh, bm] = (S.boat || '16:00').split(':').map(Number), boat = seq[i + 1] === 'anakiwa' ? date + (bh * 60 + bm) * 60e3 : null;
     const mid = (fromKm + toKm) / 2, outLen = pts[mainFrom].d;
     const pois = POIS.filter(p => !p.far && p.km >= fromKm - 0.05 && p.km <= toKm + 0.05)
       .map(p => ({ p, d: outLen + (p.km - fromKm) * 1000 })).sort((a, b) => a.d - b.d);
-    days.push({ i, from, to, fromId: seq[i], toId: seq[i + 1], fromKm, toKm, pts, mainFrom, mainTo, dist: d, up, hours, date, tStart, tEnd,
+    days.push({ i, from, to, fromId: seq[i], toId: seq[i + 1], fromKm, toKm, pts, mainFrom, mainTo, dist: d, up, hours, date, tStart, tEnd, guide, boat,
       zone: mid < 30 ? 0 : mid < 52 ? 1 : 2, pois, color: DAYCOLS[i % 5] });
   }
+  let off = 0;
+  for (const d of days) { d.off = off; off += d.dist; }
+  days.total = off;
 }
 function posOnDay(day, d) {
   const p = day.pts; d = Math.max(0, Math.min(day.dist, d));
@@ -148,7 +174,8 @@ function buildStaticMarkers() {
   for (const l of LABELS) {
     if (l.water) {
       let bx = G.toX(l.lon), bz = G.toZ(l.lat), bh = G.heightM(bx, bz); const x0 = bx, z0 = bz;
-      for (let dx = -24; dx <= 24; dx += 2) for (let dz = -24; dz <= 24; dz += 2) {
+      const rr = l.big ? 24 : 8;
+      for (let dx = -rr; dx <= rr; dx += 2) for (let dz = -rr; dz <= rr; dz += 2) {
         const h = G.heightM(x0 + dx, z0 + dz) + Math.hypot(dx, dz) * 0.6;
         if (h < bh) { bh = h; bx = x0 + dx; bz = z0 + dz; }
       }
@@ -180,8 +207,9 @@ function buildMomentMarkers() {
 // ---------- card and toast
 let selPoi = null;
 function showCard(o) {
-  $('cardKind').innerHTML = o.kindHtml; $('cardTitle').textContent = o.title; $('cardText').textContent = o.text || '';
-  $('cardText').hidden = !o.text; $('cardMeta').textContent = o.meta || ''; $('card').hidden = false;
+  $('cardKind').innerHTML = o.kindHtml; $('cardTitle').textContent = o.title;
+  if (o.html) $('cardText').innerHTML = o.html; else $('cardText').textContent = o.text || '';
+  $('cardText').hidden = !o.text && !o.html; $('cardMeta').textContent = o.meta || ''; $('card').hidden = false;
   if (o.x !== undefined && o.fly !== false) scene.flyTo({ x: o.x, z: o.z, dist: Math.min(scene.getSpherical().r, 60), dur: 1100 });
 }
 function hideCard() { $('card').hidden = true; if (selPoi) { selPoi.el.classList.remove('sel'); selPoi = null; } }
@@ -193,7 +221,9 @@ function showPoi(p) {
   else if (p.off > 250) meta += ' · ' + (p.off > 1500 ? (p.off / 1000).toFixed(1) + ' km' : Math.round(p.off / 50) * 50 + ' m') + ' from the track';
   const day = days[trackDay()];
   if (me && me.day === day.i) { const e = day.pois.find(q => q.p === p); if (e) meta += e.d > me.d ? ' · ' + kmTxt(e.d - me.d) + ' km ahead of you' : ' · behind you'; }
-  showCard({ kindHtml: glyph(p.kind) + KIND[p.kind].label, title: p.name, text: p.text, meta, x: p.x, z: p.z });
+  const fl = poiFac(p).filter(f => f !== 'view' && f !== 'boat');
+  showCard({ kindHtml: glyph(p.kind) + KIND[p.kind].label, title: p.name, text: p.text, x: p.x, z: p.z,
+    html: esc(p.text) + (fl.length ? `<span class="facrow">${fl.map(f => badge(f) + FAC[f].label).join(' &nbsp; ')}</span>` : ''), meta });
 }
 let toastTimer = 0;
 function toast(msg, ms = 3200) {
@@ -271,7 +301,7 @@ function renderDays() {
   const day = days[sel], s = W.summarize(day.tStart, day.tEnd, day.zone);
   const pills = days.map(d => `<button class="pill" aria-pressed="${d.i === sel}" data-day="${d.i}"><b><i style="background:${d.color}"></i>${W.fmtWd(d.date)} ${W.nz(d.date).d}</b><small>${kmTxt(d.dist)} km</small></button>`).join('');
   const warn = s.gust >= 75 || s.rain >= 3;
-  const pois = day.pois.map((e, n) => `<li><button data-poi="${n}"><span class="km num">${kmTxt(e.d)} km</span>${glyph(e.p.kind)}<span class="nm">${esc(e.p.name)}</span>${me && me.day === day.i && e.d > me.d && e.d - me.d < 3000 ? `<span class="away num">${kmTxt(e.d - me.d)} km</span>` : ''}</button></li>`).join('');
+  const pois = day.pois.map((e, n) => `<li><button data-poi="${n}"><span class="km num">${kmTxt(e.d)} km${day.guide && e.p.inH ? `<small>${e.p.inH}</small>` : ''}</span>${glyph(e.p.kind)}<span class="nm">${esc(e.p.name)}<span class="bd">${badges(e.p.fac)}</span></span>${me && me.day === day.i && e.d > me.d && e.d - me.d < 3000 ? `<span class="away num">${kmTxt(e.d - me.d)} km</span>` : ''}</button></li>`).join('');
   const opts = (n) => {
     const prevKm = n === 0 ? 0 : G.SIDES[STOPS[S.nights[n - 1]].leave].km;
     return NIGHT_OPTIONS.filter(id => G.SIDES[STOPS[id].arrive].km > prevKm + 2).map(id => `<option value="${id}" ${S.nights[n] === id ? 'selected' : ''}>${esc(STOPS[id].name)}</option>`).join('') + `<option value="" ${S.nights[n] ? '' : 'selected'}>Walk out to Anakiwa</option>`;
@@ -288,17 +318,19 @@ function renderDays() {
     <div class="stats">
       <div><b class="num">${kmTxt(day.dist)}</b><span>km</span></div>
       <div><b class="num">${Math.round(day.up / 10) * 10}</b><span>m of climb</span></div>
-      <div><b class="num">${durTxt(day.hours)}</b><span>walk time</span></div>
+      <div><b class="num">${day.guide ? (day.guide.h[0] === day.guide.h[1] ? day.guide.h[0] + ' h' : day.guide.h[0] + '–' + day.guide.h[1] + ' h') : durTxt(day.hours)}</b><span>${day.guide ? 'route guide time' : 'walk time'}</span></div>
     </div>
-    <label class="startrow" for="startTime"><span>Start</span><input type="time" id="startTime" value="${S.starts[day.i] || '08:30'}"><span class="num">Arrive about ${W.fmtTime(day.tEnd)}, with short stops</span></label>
+    <label class="startrow" for="startTime"><span>Start</span><input type="time" id="startTime" value="${S.starts[day.i] || '08:30'}"><span class="num">Arrive about ${W.fmtTime(day.tEnd)}${day.guide && day.guide.km ? '. Route guide: ' + day.guide.km + ' km' : ''}</span></label>
+    ${day.boat ? `<label class="startrow boatrow ${day.tEnd > day.boat - 20 * 60e3 ? 'late' : ''}" for="boatTime"><span>Boat</span><input type="time" id="boatTime" value="${S.boat}"><span class="num">${day.tEnd > day.boat ? 'Your plan arrives after the boat. Start earlier.' : 'Water taxi from Anakiwa. Your plan has ' + durTxt((day.boat - day.tEnd) / W.HOUR) + ' spare.' + (day.boat - day.tEnd < 45 * 60e3 ? ' Start earlier if you can.' : '')}</span></label>` : ''}
     <button class="verdict ${warn ? 'warn' : ''}" id="verdict" style="text-align:left">${W.icon(s.code, true)}<span><b class="num">${Math.round(s.tmin)}° to ${Math.round(s.tmax)}° · ${s.rain >= 0.3 ? s.rain.toFixed(1) + ' mm rain' : 'no rain'} · gusts ${Math.round(s.gust)}</b>${esc(s.verdict.join(' '))}</span></button>
     ${profileSvg(day)}
     <div class="btns"><button class="btn pri" id="flyDay">Fly this day</button><button class="btn" id="showDay">Show on map</button><button class="btn" id="editPlan">${planOpen ? 'Close plan' : 'Change plan'}</button></div>
     ${plan}
+    ${day.guide ? `<h3 class="t">Know before you go</h3><ul class="notes">${day.guide.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
     <h3 class="t">On the way</h3>
     <ol class="list">${pois}</ol>
     <div class="tonight"><b>${day.toId === 'anakiwa' ? 'Finish' : 'Tonight'}: ${esc(day.to.name)}</b><p>${esc(day.to.note)}</p></div>
-    <p class="fine">The lodges are an assumption for a 4-day walk. Use Change plan if yours are different. Track line and places: OpenStreetMap contributors. Heights: NASA SRTM.</p>`;
+    <p class="fine">Times, facilities and route notes: Wilderness Guides route guide. Distances are measured on this map. Use Change plan if your lodges are different. Track line and places: OpenStreetMap contributors.</p>`;
 }
 function wireDays() {
   const p = $('p-days');
@@ -314,6 +346,7 @@ function wireDays() {
   p.addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'startTime' && t.value) { S.starts[sel] = t.value; save(); buildDays(); renderDays(); }
+    if (t.id === 'boatTime' && t.value) { S.boat = t.value; save(); buildDays(); renderDays(); }
     if (t.dataset.night !== undefined) {
       const n = +t.dataset.night;
       S.nights = S.nights.slice(0, n); if (t.value) S.nights.push(t.value);
@@ -465,6 +498,7 @@ function renderTrack() {
       <div><b class="num">${pi && pi.mph ? (pi.mph / 1000).toFixed(1) : '–'}</b><span>km/h now</span></div>
       <div><b class="num">${pi && isToday ? W.fmtTime(pi.eta) : '–'}</b><span>at ${esc(day.to.short)}</span></div>
     </div>
+    ${day.boat && isToday ? (() => { const eta = pi ? pi.eta : day.tEnd, sp = (day.boat - eta) / 60e3; return `<p class="boatline ${sp < 20 ? 'late' : ''} num">${badge('boat')}Boat leaves Anakiwa at ${W.fmtTime(day.boat)}. ${sp >= 0 ? 'At this speed you have ' + durTxt(sp / 60) + ' spare.' : 'At this speed you are ' + durTxt(-sp / 60) + ' late. Call the office: ' + HELP.office + '.'}</p>`; })() : ''}
     ${isToday && light !== null && light > 0 ? `<p class="fine num">Sunset is at ${W.fmtTime(sun.set)}. You have ${durTxt(light)} of daylight.</p>` : ''}
     <h3 class="t">Set your position by hand · day ${day.i + 1}</h3>
     <input type="range" class="plain" id="manual" min="0" max="${Math.round(day.dist)}" step="50" value="${Math.round(manualD)}" aria-label="Position on the route">
@@ -502,6 +536,85 @@ function wireTrack() {
       catch (er) { wake = null; e.target.checked = false; toast('This browser cannot keep the screen on'); }
     } else if (wake) { try { await wake.release(); } catch (er) { /* ignore */ } wake = null; }
   });
+}
+
+// ---------- Profile panel: the whole track
+const PF = { PX: 17, L: 30, R: 26, TOP: 92, PH: 104, B: 20 };
+function profilePlaces() {
+  const out = [], seen = {};
+  const seq = ['shipcove', ...S.nights, 'anakiwa'];
+  seq.forEach((id, n) => {
+    const d = n === 0 ? days[0] : days[n - 1], D = n === 0 ? 0 : d.off + d.dist;
+    out.push({ D, ele: n === 0 ? days[0].pts[0].ele : d.pts[d.pts.length - 1].ele, name: STOPS[id].short, fac: n === 0 ? ['boat', 'toilet'] : n === seq.length - 1 ? ['boat', 'toilet'] : ['lodge'], pri: 3, stop: id });
+  });
+  for (const d of days) for (const e of d.pois) {
+    if (seen[e.p.id] || e.p.kind === 'boat') continue; seen[e.p.id] = 1;
+    out.push({ D: d.off + e.d, ele: posOnDay(d, e.d).ele, name: e.p.short || e.p.name, fac: poiFac(e.p), pri: e.p.prof === false ? 0 : (e.p.fac || []).includes('shelter') ? 2 : 1, poi: e.p });
+  }
+  return out;
+}
+function renderProfile() {
+  const { PX, L, R, TOP, PH, B } = PF, total = days.total, Wd = L + R + total / 1000 * PX, Hh = TOP + PH + B;
+  const X = D => L + D / 1000 * PX, Y = e => TOP + PH - Math.min(e, 500) / 500 * PH;
+  let g = '';
+  for (const v of [0, 125, 250, 375, 500]) g += `<line x1="${L}" x2="${Wd - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,${v ? 0.09 : 0.25})"/>`;
+  for (let k = 0; k <= total / 1000; k += 5) g += `<text x="${X(k * 1000)}" y="${Hh - 5}" text-anchor="middle">${k} km</text><line x1="${X(k * 1000)}" x2="${X(k * 1000)}" y1="${TOP + PH}" y2="${TOP + PH + 4}" stroke="rgba(255,255,255,.4)"/>`;
+  let areas = '';
+  for (const d of days) {
+    const step = Math.max(1, Math.floor(d.pts.length / 200)); let line = '';
+    for (let i = 0; i < d.pts.length; i += step) line += (i ? 'L' : 'M') + X(d.off + d.pts[i].d).toFixed(1) + ' ' + Y(d.pts[i].ele).toFixed(1);
+    const last = d.pts[d.pts.length - 1]; line += 'L' + X(d.off + last.d).toFixed(1) + ' ' + Y(last.ele).toFixed(1);
+    const s = W.summarize(d.tStart, d.tEnd, d.zone);
+    areas += `<path d="${line}L${X(d.off + d.dist).toFixed(1)} ${Y(0)}L${X(d.off).toFixed(1)} ${Y(0)}Z" fill="${d.color}" fill-opacity="${d.i === sel ? 0.5 : 0.28}"/><path d="${line}" fill="none" stroke="${d.color}" stroke-width="1.8" stroke-linejoin="round"/>
+      <line x1="${X(d.off)}" x2="${X(d.off)}" y1="16" y2="${TOP + PH}" stroke="rgba(255,255,255,.3)" stroke-dasharray="3 3"/>
+      <rect x="${X(d.off) + 1}" y="0" width="${d.dist / 1000 * PX - 2}" height="15" rx="4" fill="${d.color}" fill-opacity="${d.i === sel ? 0.95 : 0.6}"/>
+      <text x="${X(d.off) + 6}" y="11" style="fill:#1b1206;font-weight:700">Day ${d.i + 1} · ${W.fmtWd(d.date)} · ${kmTxt(d.dist)} km${d.guide ? ' · ' + d.guide.h[1] + ' h' : ''}${s.rain >= 1 ? ' · rain' : ''}${s.gust >= 70 ? ' · wind' : ''}</text>`;
+    for (const v of [250, 500]) areas += `<text x="${X(d.off) + 3}" y="${Y(v) - 2}" style="fill:rgba(236,244,240,.55)">${v} m</text>`;
+  }
+  // labels in three rows; a place with no free row keeps only its dot
+  const places = profilePlaces().sort((a, b) => b.pri - a.pri || a.D - b.D), rows = [[], [], []], rowY = [30, 52, 74];
+  let marks = '';
+  for (const pl of places) {
+    const x = X(pl.D), y = Y(pl.ele), w = pl.name.length * 5.5 + pl.fac.length * 12 + 8;
+    let r = -1;
+    if (pl.pri > 0) for (let k = 0; k < 3 && r < 0; k++) if (!rows[k].some(b => x - 3 < b[1] && x + w > b[0])) r = k;
+    if (r >= 0) {
+      rows[r].push([x - 3, x + w]);
+      marks += `<line x1="${x}" x2="${x}" y1="${rowY[r] + 4}" y2="${y - 3}" stroke="rgba(255,255,255,.35)"/><text x="${x + 2}" y="${rowY[r]}" style="fill:#ecf4f0;font-weight:${pl.pri === 3 ? 700 : 500}">${esc(pl.name)}</text>`;
+      pl.fac.forEach((f, n) => { marks += `<g transform="translate(${x + 4 + pl.name.length * 5.5 + n * 12},${rowY[r] - 9}) scale(0.66)">${facInner(f)}</g>`; });
+    }
+    marks += `<circle cx="${x}" cy="${y}" r="${pl.pri === 3 ? 4 : 2.6}" fill="${pl.pri === 3 ? '#ffb454' : '#fff'}" stroke="#06181c"/>`;
+  }
+  const meD = me && me.day !== null && days[me.day] ? days[me.day].off + me.d : null;
+  const meX = meD !== null ? `<line x1="${X(meD)}" x2="${X(meD)}" y1="${TOP - 6}" y2="${TOP + PH}" stroke="#fff" stroke-width="1.5"/><circle cx="${X(meD)}" cy="${Y(posOnDay(days[me.day], me.d).ele)}" r="4.5" fill="#fff" stroke="#06181c"/><text x="${X(meD) + 5}" y="${TOP + PH - 4}" style="fill:#fff;font-weight:700">You</text>` : '';
+  const hi = Math.max(...days.flatMap(d => d.pts.map(p => p.ele)));
+  $('p-profile').innerHTML = `
+    <p class="fine num" id="pfRead">Ship Cove to Anakiwa. Slide the profile sideways. Touch it to see that point on the map.</p>
+    <div class="hscroll" id="pfScroll"><svg class="profile wide" id="pfSvg" style="width:${Math.round(Wd)}px;height:${Hh}px" width="${Math.round(Wd)}" height="${Hh}" viewBox="0 0 ${Wd.toFixed(0)} ${Hh}" role="img" aria-label="Height profile of the whole track. Highest point ${Math.round(hi)} metres.">
+      ${g}${areas}${marks}${meX}<line id="pfCur" x1="0" x2="0" y1="${TOP - 6}" y2="${TOP + PH}" stroke="#9ff3e6" stroke-width="1.5" visibility="hidden"/></svg></div>
+    <div class="legend">${Object.keys(FAC).map(f => `<span>${badge(f)}${FAC[f].label}</span>`).join('')}</div>
+    <p class="fine num">${kmTxt(total)} km on this map, with the side tracks to your lodges. The official track length is 73.5 km. Heights are in metres above sea level. The printed route guide shows Anakiwa on the left. Here the profile runs in your walk direction.</p>`;
+  const sc = $('pfScroll'), focus = meD !== null ? meD : days[sel].off;
+  sc.scrollLeft = Math.max(0, X(focus) - 40);
+}
+function wireProfile() {
+  $('p-profile').addEventListener('click', e => {
+    const svg = e.target.closest('#pfSvg'); if (!svg) return;
+    const r = svg.getBoundingClientRect(), D = Math.max(0, Math.min(days.total, (e.clientX - r.left - PF.L) / PF.PX * 1000));
+    let day = days[days.length - 1];
+    for (const d of days) if (D <= d.off + d.dist) { day = d; break; }
+    const q = posOnDay(day, D - day.off), cur = $('pfCur'), x = PF.L + D / 1000 * PF.PX;
+    cur.setAttribute('x1', x); cur.setAttribute('x2', x); cur.setAttribute('visibility', 'visible');
+    $('pfRead').textContent = `Day ${day.i + 1} · ${kmTxt(D)} km from Ship Cove · ${Math.round(q.ele)} m above sea level`;
+    if (day.i !== sel) { sel = day.i; drawRoutes(); updateHud(); }
+    scene.setGhost(q); scene.flyTo({ x: q.x, z: q.z, y: q.y, dist: 52, polar: 1.0, az: Math.atan2(-q.hx, -q.hz), dur: 1200 });
+  });
+}
+function showHelp() {
+  showCard({ kindHtml: badge('boat') + 'Help', title: 'If something goes wrong', fly: false,
+    html: `<ul class="notes">${HELP.lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>
+      <span class="facrow"><a class="btn pri" href="tel:111">Call 111</a> <a class="btn" href="tel:${HELP.office.replace(/ /g, '')}">Office ${HELP.office}</a></span>
+      <span class="facrow">Office from an overseas phone: ${HELP.officeIntl}. Luggage for the boat: 15 kg at most. There are no rubbish bins on the track: carry all waste out.</span>` });
 }
 
 // ---------- Spot panel
@@ -610,7 +723,7 @@ function wireReplay() {
 
 // ---------- shell
 function renderAll() {
-  if (S.tab === 'days') renderDays(); else if (S.tab === 'sky') renderSky(); else if (S.tab === 'track') renderTrack(); else if (S.tab === 'spot') renderSpot(); else renderReplay();
+  if (S.tab === 'days') renderDays(); else if (S.tab === 'profile') renderProfile(); else if (S.tab === 'sky') renderSky(); else if (S.tab === 'track') renderTrack(); else if (S.tab === 'spot') renderSpot(); else renderReplay();
 }
 function setTab(tab, toggle) {
   const sheet = $('sheet');
@@ -619,7 +732,7 @@ function setTab(tab, toggle) {
   S.tab = tab; save();
   for (const b of $('tabs').children) b.setAttribute('aria-selected', b.dataset.tab === tab);
   for (const p of $('panels').children) p.hidden = p.id !== 'p-' + tab;
-  if (tab !== 'track' && tab !== 'days') scene.setGhost(null);
+  if (tab !== 'track' && tab !== 'days' && tab !== 'profile') scene.setGhost(null);
   renderAll(); $('panels').scrollTop = 0; layout();
 }
 function layout() {
@@ -629,11 +742,12 @@ function layout() {
 }
 
 function init() {
-  if (!['days', 'sky', 'track', 'spot', 'replay'].includes(S.tab)) S.tab = 'days';
+  if (!['days', 'profile', 'sky', 'track', 'spot', 'replay'].includes(S.tab)) S.tab = 'days';
   if (S.nights.some(id => !STOPS[id])) S.nights = DEFAULT_NIGHTS.slice();
   buildDays(); sel = Math.min(sel, days.length - 1);
   buildStaticMarkers(); buildStopMarkers(); buildMomentMarkers(); drawRoutes(); updateHud(); buildTimebar();
-  wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay();
+  wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile();
+  $('helpBtn').addEventListener('click', showHelp);
   const last = S.checkins[S.checkins.length - 1];
   if (last && last.day === trackDay() && Date.now() - last.t < 18 * W.HOUR) me = { lat: last.lat, lon: last.lon, t: last.t, day: last.day, d: last.d, off: 0, src: last.src === 'm' ? 'manual' : 'gps' };
   setTab(S.tab);
@@ -655,7 +769,11 @@ function init() {
   scene.flyTo({ x: 0, z: 0, dist: 520, az: 0.5, polar: 0.75, dur: 0 });
   setTimeout(() => { if (performance.now() - scene.lastTouch() > 1e8 || scene.lastTouch() < 0) scene.frame(days[sel].pts, { dur: 2600 }); }, 700);
   refreshWx(true);
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => { /* not allowed in this frame */ });
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    const had = !!navigator.serviceWorker.controller; let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (had && !reloaded) { reloaded = true; location.reload(); } }); // a new version is ready
+    navigator.serviceWorker.register('sw.js').then(r => r.update && r.update()).catch(() => { /* not allowed in this frame */ });
+  }
 
   let lastFrame = 0;
   function loop(now) {
