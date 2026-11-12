@@ -419,7 +419,9 @@ function wireSky() {
 }
 
 // ---------- Track me panel
-let watchId = null, gpsMsg = '', wake = null, manualD = null;
+let watchId = null, gpsMsg = '', wake = null, manualD = null, wantFly = false;
+const flyToMe = () => { const w = G.world(me); scene.flyTo({ x: w.x, z: w.z, dist: 38, polar: 1.0, dur: 1400 }); };
+const gpsUi = () => { $('locBtn').classList.toggle('on', watchId !== null); renderTrack(); };
 const trackDay = () => todayIndex() ?? sel;
 function setMe(lat, lon, acc, src, forceDay) {
   const ti = forceDay ?? todayIndex(), t = Date.now();
@@ -429,7 +431,7 @@ function setMe(lat, lon, acc, src, forceDay) {
   } else {
     const day = days[ti], s = nearestOnDay(day, lat, lon);
     me = { lat, lon, acc, src, t, day: ti, d: s.d, off: s.off };
-    if (src === 'gps') manualD = s.d;
+    if (src === 'gps' && s.off < 1500) manualD = s.d;
     if (s.off < 1500 || src === 'manual') {
       const last = S.checkins[S.checkins.length - 1];
       if (src === 'manual' || !last || last.day !== ti || t - last.t > 40e3 || Math.abs(s.d - last.d) > 25) {
@@ -455,21 +457,26 @@ function startGps() {
       const c = p.coords;
       if (c.accuracy > 200) { gpsMsg = 'GPS signal is weak (' + Math.round(c.accuracy) + ' m). Wait for a better fix.'; renderTrack(); return; }
       gpsMsg = ''; setMe(c.latitude, c.longitude, c.accuracy, 'gps');
+      if (wantFly) {
+        wantFly = false;
+        if (G.inBounds(me.lat, me.lon)) flyToMe(); else toast('You are outside this map, ' + Math.round(me.off / 1000) + ' km from the track.', 5000);
+      }
     }, err => {
       gpsMsg = err.code === 1 ? 'Location is blocked here. Open the app from your home screen and allow location, or set your position by hand.'
         : err.code === 2 ? 'No GPS signal. Go to a place with open sky.' : 'GPS is slow. Wait, or set your position by hand.';
-      if (err.code === 1) stopGps(true);
-      renderTrack();
+      if (err.code === 1) { stopGps(true); S.gps = false; save(); }
+      if (S.tab !== 'track' || wantFly) toast(gpsMsg, 6000);
+      wantFly = false; gpsUi();
     }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 45000 });
-  } catch (e) { gpsMsg = 'Location is not available here. Set your position by hand.'; watchId = null; }
-  renderTrack();
+  } catch (e) { gpsMsg = 'Location is not available here. Set your position by hand.'; watchId = null; toast(gpsMsg, 5000); }
+  gpsUi();
 }
 function stopGps(keepMsg) {
   if (watchId !== null) { try { navigator.geolocation.clearWatch(watchId); } catch (e) { /* ignore */ } }
-  watchId = null; if (!keepMsg) gpsMsg = ''; renderTrack();
+  watchId = null; if (!keepMsg) gpsMsg = ''; gpsUi();
 }
 function paceInfo(day) {
-  if (!me || me.day !== day.i) return null;
+  if (!me || me.day !== day.i || (me.off > 1500 && me.src !== 'manual')) return null;
   const now = Date.now(), rec = S.checkins.filter(c => c.day === day.i && now - c.t < 45 * 60e3 && now - c.t >= 0);
   let mph = null;
   if (rec.length >= 2) { const a = rec[0], b = rec[rec.length - 1]; if (b.t - a.t > 6 * 60e3 && b.d - a.d > 250) mph = (b.d - a.d) / ((b.t - a.t) / W.HOUR); }
@@ -479,9 +486,11 @@ function paceInfo(day) {
 }
 function renderTrack() {
   const day = days[trackDay()], on = watchId !== null, isToday = todayIndex() !== null, pi = paceInfo(day);
+  const oldTxt = $('momentTxt') ? $('momentTxt').value : '', hadFocus = document.activeElement && document.activeElement.id === 'momentTxt';
   let status;
   if (gpsMsg) status = gpsMsg;
   else if (me && me.day === null) status = me.off > 3000 ? 'You are ' + Math.round(me.off / 1000) + ' km from the track.' : 'You are at km ' + me.km.toFixed(1) + ' of the track.';
+  else if (me && me.day === day.i && me.off > 1500 && me.src !== 'manual') status = 'GPS is on. You are ' + (me.off / 1000).toFixed(1) + ' km from the route of day ' + (day.i + 1) + '. The map shows your position.';
   else if (me && me.day === day.i) status = (me.off > 300 && me.src !== 'manual' ? Math.round(me.off / 10) * 10 + ' m off the route. ' : 'On the route. ') + kmTxt(me.d) + ' km done, ' + kmTxt(day.dist - me.d) + ' km to ' + day.to.short + '.';
   else if (on) status = 'Tracking is on.';
   else if (!isToday) { const h = (DAY0 - Date.now()) / W.HOUR; status = h > 0 ? 'The walk starts in ' + (h > 48 ? Math.round(h / 24) + ' days.' : Math.round(h) + ' hours.') : 'The walk is complete. Open Replay to see it again.'; }
@@ -507,19 +516,21 @@ function renderTrack() {
     <div class="row"><input class="txt" id="momentTxt" maxlength="80" placeholder="Dolphins from the jetty" aria-label="Note for this place"><button class="btn" id="momentBtn">Save</button></div>
     <label class="chk" for="wake"><input type="checkbox" id="wake" ${wake ? 'checked' : ''}>Keep the screen on</label>
     <p class="fine">A web app records your position only while it is open on the screen. Open it at each stop. Replay joins your check-ins along the track. Check-ins stay on this phone.</p>`;
+  if (oldTxt) $('momentTxt').value = oldTxt;
+  if (hadFocus) { const el = $('momentTxt'); el.focus(); try { el.setSelectionRange(oldTxt.length, oldTxt.length); } catch (e) { /* ignore */ } }
 }
 function wireTrack() {
   const p = $('p-track');
   p.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
-    if (b.id === 'gpsBtn') { watchId !== null ? stopGps() : startGps(); }
-    else if (b.id === 'findMe') { const w = G.world(me); scene.flyTo({ x: w.x, z: w.z, dist: 38, polar: 1.0, dur: 1400 }); }
+    if (b.id === 'gpsBtn') { if (watchId !== null) { stopGps(); S.gps = false; } else { wantFly = true; startGps(); S.gps = true; } save(); }
+    else if (b.id === 'findMe') flyToMe();
     else if (b.id === 'checkin') { const day = days[trackDay()], q = posOnDay(day, manualD); setMe(q.lat, q.lon, 0, 'manual', day.i); toast('Checked in at ' + kmTxt(manualD) + ' km'); }
     else if (b.id === 'momentBtn') {
       const txt = $('momentTxt').value.trim(); if (!txt) { toast('Write a short note first'); return; }
       const day = days[trackDay()], q = me && me.day === day.i ? me : posOnDay(day, manualD);
       S.moments.push({ t: Date.now(), lat: +q.lat.toFixed(5), lon: +q.lon.toFixed(5), day: day.i, d: Math.round(q.d), text: txt });
-      save(); buildMomentMarkers(); renderTrack(); toast('Moment saved');
+      $('momentTxt').value = ''; save(); buildMomentMarkers(); renderTrack(); toast('Moment saved');
     }
   });
   p.addEventListener('input', e => {
@@ -748,6 +759,12 @@ function init() {
   buildStaticMarkers(); buildStopMarkers(); buildMomentMarkers(); drawRoutes(); updateHud(); buildTimebar();
   wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile();
   $('helpBtn').addEventListener('click', showHelp);
+  $('locBtn').addEventListener('click', () => {
+    if (watchId === null) { wantFly = true; S.gps = true; save(); startGps(); toast('Looking for your position…', 4000); }
+    else if (me && me.src !== 'manual' && G.inBounds(me.lat, me.lon)) flyToMe();
+    else if (me && me.src !== 'manual') toast('You are outside this map, ' + Math.round(me.off / 1000) + ' km from the track.', 5000);
+    else toast(gpsMsg || 'Waiting for GPS…', 4000);
+  });
   const last = S.checkins[S.checkins.length - 1];
   if (last && last.day === trackDay() && Date.now() - last.t < 18 * W.HOUR) me = { lat: last.lat, lon: last.lon, t: last.t, day: last.day, d: last.d, off: 0, src: last.src === 'm' ? 'manual' : 'gps' };
   setTab(S.tab);
@@ -769,6 +786,7 @@ function init() {
   scene.flyTo({ x: 0, z: 0, dist: 520, az: 0.5, polar: 0.75, dur: 0 });
   setTimeout(() => { if (performance.now() - scene.lastTouch() > 1e8 || scene.lastTouch() < 0) scene.frame(days[sel].pts, { dur: 2600 }); }, 700);
   refreshWx(true);
+  if (S.gps) startGps(); // tracking was on the last time: start it again
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     const had = !!navigator.serviceWorker.controller; let reloaded = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (had && !reloaded) { reloaded = true; location.reload(); } }); // a new version is ready

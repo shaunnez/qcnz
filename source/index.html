@@ -69,6 +69,9 @@ h1,h2,h3{text-wrap:balance}
 .chip small{display:block;font-size:11px;color:var(--mute);line-height:1.15;text-align:left}
 #compass{width:40px;height:40px;border-radius:50%;background:var(--glass);border:1px solid var(--edge);display:grid;place-items:center;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 #compass svg{width:24px;height:24px}
+#locBtn{width:40px;height:40px;border-radius:50%;background:var(--glass);border:1px solid var(--edge);display:grid;place-items:center;color:var(--text);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+#locBtn svg{width:22px;height:22px}
+#locBtn.on{background:#fff;color:#0c2227;border-color:#fff}
 
 /* card for a place */
 #card{position:fixed;left:12px;right:12px;bottom:calc(var(--sheet-h,300px) + 10px);max-width:520px;margin:0 auto;padding:13px 14px 14px;border-radius:16px;background:rgba(8,25,30,.93);border:1px solid var(--edge);box-shadow:0 10px 40px rgba(0,0,0,.45);z-index:5}
@@ -219,6 +222,9 @@ input[type=range].plain::-moz-range-thumb{width:18px;height:18px;border-radius:5
     <button class="chip" id="wxChip" aria-label="Open the forecast"></button>
     <button id="compass" aria-label="Turn the map north up">
       <svg viewBox="0 0 24 24" id="needle"><path d="M12 2.5 15.5 12h-7z" fill="#ff7d5c"/><path d="M12 21.5 8.5 12h7z" fill="#dfe9e6"/></svg>
+    </button>
+    <button id="locBtn" aria-label="Show my position on the map">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></svg>
     </button>
     <button id="helpBtn" aria-label="Help and phone numbers">Help</button>
   </div>
