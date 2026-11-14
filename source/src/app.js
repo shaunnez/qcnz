@@ -458,7 +458,7 @@ async function sharePublish(force) {
 async function sharePoll() {
   if (!S.share || document.hidden) return;
   try {
-    const k = await shareKeys(), since = S.share.since ? S.share.since : '12h';
+    const k = await shareKeys(), since = S.share.since ? S.share.since - 1 : '12h';
     const r = await fetch(RELAY + k.topic + '/json?poll=1&since=' + since, { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     let changed = false;
@@ -472,7 +472,7 @@ async function sharePoll() {
         if (!o || o.id === S.devId || typeof o.la !== 'number') continue;
         const p = S.peers[o.id] || (S.peers[o.id] = { trail: [] });
         if (o.t >= (p.t || 0)) Object.assign(p, { n: String(o.n || 'Walker').slice(0, 24), t: o.t, lat: o.la, lon: o.lo, day: o.dy, d: o.d, of: o.of, to: o.to, hr: o.hr });
-        p.trail.push([o.t, o.la, o.lo]); if (p.trail.length > 300) p.trail.shift();
+        if (!p.trail.some(q => q[0] === o.t)) { p.trail.push([o.t, o.la, o.lo]); p.trail.sort((x, y) => x[0] - y[0]); if (p.trail.length > 300) p.trail.shift(); }
         changed = true;
       } catch (e) { /* not for this code */ }
     }
