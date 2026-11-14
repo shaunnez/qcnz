@@ -36,7 +36,7 @@ const kmTxt = m => (m / 1000).toFixed(1);
 const durTxt = h => { const m = Math.round(h * 60); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + W.p2(m % 60); };
 
 // ---------- saved data (this device only)
-const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {} }, (() => {
+const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {}, share: null, peers: {}, shareName: '', devId: '' }, (() => {
   try {
     const cur = localStorage.getItem(KEY);
     if (cur) return JSON.parse(cur);
@@ -49,6 +49,7 @@ function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage is not available */ } }, 300);
 }
+if (!S.devId) S.devId = Math.random().toString(36).slice(2, 10);
 if (S.wx && S.wx.zones && Date.parse(S.wx.fetched) > Date.parse(W.WX.fetched)) W.setWX(S.wx);
 
 // ---------- places
@@ -418,6 +419,140 @@ function wireSky() {
   });
 }
 
+// ---------- share positions with a code
+// Messages go through the public relay ntfy.sh. They are encrypted on the phone with a key made from the share code.
+const RELAY = 'https://ntfy.sh/', CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const SH = { keys: null, lastPub: 0, lastPos: null, pending: false, status: '', seen: {}, timer: 0, armed: false };
+const b64 = u8 => btoa(String.fromCharCode(...u8)), unb64 = t => Uint8Array.from(atob(t), c => c.charCodeAt(0));
+const cleanCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const prettyCode = c => cleanCode(c).replace(/(.{4})(?=.)/g, '$1-');
+const ago = t => { const m = Math.round((Date.now() - t) / 60e3); return m < 1 ? 'now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.floor(m / 60) + ' h ' + W.p2(m % 60) + ' ago' : Math.round(m / 1440) + ' days ago'; };
+async function shareKeys() {
+  if (!S.share) return null;
+  if (SH.keys && SH.keys.code === S.share.code) return SH.keys;
+  const enc = new TextEncoder(), h = async t => new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(t)));
+  const tb = await h('qcnz-topic:' + S.share.code);
+  SH.keys = { code: S.share.code, topic: 'qcnz' + [...tb.slice(0, 12)].map(x => x.toString(16).padStart(2, '0')).join(''),
+    key: await crypto.subtle.importKey('raw', await h('qcnz-key:' + S.share.code), 'AES-GCM', false, ['encrypt', 'decrypt']) };
+  return SH.keys;
+}
+async function sharePublish(force) {
+  if (!S.share || !S.share.send || !me || me.src === 'manual' && !force) return;
+  const now = Date.now(), moved = SH.lastPos ? G.distM(me.lat, me.lon, SH.lastPos[0], SH.lastPos[1]) : 1e9;
+  if (!force && !(now - SH.lastPub > 3 * 60e3 && moved > 50) && !(now - SH.lastPub > 12 * 60e3)) return;
+  if (SH.pending) return;
+  SH.pending = true;
+  try {
+    const k = await shareKeys(), day = me.day !== null && days[me.day] ? days[me.day] : null, on = day && (me.off < 300 || me.src === 'manual');
+    const o = { v: 1, id: S.devId, n: S.share.name || 'Walker', t: me.t, la: +me.lat.toFixed(5), lo: +me.lon.toFixed(5) };
+    if (on) { o.dy = day.i; o.d = Math.round(me.d); o.of = Math.round(day.dist); o.to = day.to.short; }
+    if (HR.bpm && now - HR.t < 60e3) o.hr = HR.bpm;
+    const iv = crypto.getRandomValues(new Uint8Array(12)), ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k.key, new TextEncoder().encode(JSON.stringify(o))));
+    const body = new Uint8Array(12 + ct.length); body.set(iv); body.set(ct, 12);
+    const r = await fetch(RELAY + k.topic, { method: 'POST', body: b64(body) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    SH.lastPub = now; SH.lastPos = [me.lat, me.lon]; S.share.sent = now; SH.status = ''; save();
+  } catch (e) { SH.status = 'Your position did not send. The app tries again when there is signal.'; }
+  SH.pending = false; shareUi();
+}
+async function sharePoll() {
+  if (!S.share || document.hidden) return;
+  try {
+    const k = await shareKeys(), since = S.share.since ? S.share.since : '12h';
+    const r = await fetch(RELAY + k.topic + '/json?poll=1&since=' + since, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    let changed = false;
+    for (const line of (await r.text()).split('\n')) {
+      if (!line.trim()) continue;
+      let m; try { m = JSON.parse(line); } catch (e) { continue; }
+      if (m.event !== 'message' || SH.seen[m.id]) continue;
+      SH.seen[m.id] = 1; S.share.since = Math.max(+S.share.since || 0, m.time);
+      try {
+        const raw = unb64(m.message), o = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, k.key, raw.slice(12))));
+        if (!o || o.id === S.devId || typeof o.la !== 'number') continue;
+        const p = S.peers[o.id] || (S.peers[o.id] = { trail: [] });
+        if (o.t >= (p.t || 0)) Object.assign(p, { n: String(o.n || 'Walker').slice(0, 24), t: o.t, lat: o.la, lon: o.lo, day: o.dy, d: o.d, of: o.of, to: o.to, hr: o.hr });
+        p.trail.push([o.t, o.la, o.lo]); if (p.trail.length > 300) p.trail.shift();
+        changed = true;
+      } catch (e) { /* not for this code */ }
+    }
+    S.share.polled = Date.now(); if (SH.status.startsWith('No connection')) SH.status = '';
+    if (changed) save();
+  } catch (e) { SH.status = 'No connection to the share service. This is the last position that arrived.'; }
+  drawPeers(); shareUi();
+}
+function drawPeers() {
+  scene.clearMarkers('peers');
+  const lines = [];
+  if (!S.share) { scene.setPeerTrails([]); return; }
+  for (const id of Object.keys(S.peers)) {
+    const p = S.peers[id]; if (!G.inBounds(p.lat, p.lon)) continue;
+    const w = G.world(p, 1.4), el = mkEl('peer', `<button><i></i>${esc(p.n)} · ${ago(p.t)}</button>`);
+    el.firstChild.addEventListener('click', () => showPeer(id));
+    scene.addMarker({ el, ...w, pri: 190, group: 'peers', noOcc: true, force: true, w: 120, h: 28 });
+    const tr = p.trail.filter(q => G.inBounds(q[1], q[2])).map(q => G.world({ lat: q[1], lon: q[2] }, 0.45));
+    if (tr.length > 1) lines.push(tr);
+  }
+  scene.setPeerTrails(lines);
+}
+function peerLine(p) {
+  let t = ago(p.t);
+  if (p.day !== undefined && p.d !== undefined) t += ` · day ${p.day + 1}: ${kmTxt(p.d)} km done, ${kmTxt(Math.max(0, p.of - p.d))} km to ${p.to || 'the end'}`;
+  else if (!G.inBounds(p.lat, p.lon)) t += ' · outside this map';
+  else t += ' · not on the route';
+  if (p.hr) t += ' · ♥ ' + p.hr;
+  return t;
+}
+function showPeer(id) {
+  const p = S.peers[id]; if (!p) return;
+  const w = G.inBounds(p.lat, p.lon) ? G.world(p) : null;
+  showCard({ kindHtml: 'Shared position', title: p.n, text: 'Last position: ' + W.fmtDay(p.t) + ' at ' + W.fmtTime(p.t) + ', ' + peerLine(p) + '. ' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '.', x: w ? w.x : undefined, z: w ? w.z : undefined });
+}
+function shareHtml() {
+  if (!window.crypto || !crypto.subtle) return '<p class="fine">Position sharing needs the app at its web address. It cannot work in this preview.</p>';
+  if (!S.share) return `<p class="fine">Make a code and send it to your partner. Each person with the code sees the others on the map. The position goes out each time the app is open and has signal.</p>
+    <div class="row"><input class="txt" id="shName" maxlength="20" placeholder="Your name" value="${esc(S.shareName || '')}" aria-label="Your name"><button class="btn sea" id="shNew">Make a code</button></div>
+    <div class="row"><input class="txt" id="shCode" maxlength="20" placeholder="Code from your partner" autocapitalize="characters" autocomplete="off" aria-label="Share code"><button class="btn" id="shJoin">Join</button></div>`;
+  const peers = Object.keys(S.peers).sort((a, b) => S.peers[b].t - S.peers[a].t).map(id => `<li><button data-peer="${id}"><span class="nm"><b>${esc(S.peers[id].n)}</b><br><span class="fine num">${esc(peerLine(S.peers[id]))}</span></span><span class="away">Map</span></button></li>`).join('');
+  return `<p class="big num" style="letter-spacing:.06em">${prettyCode(S.share.code)}</p>
+    <div class="btns"><button class="btn sea" id="shSend">Send the link</button><button class="btn" id="shNow">Send my position now</button><button class="btn danger" id="shStop">${SH.armed ? 'Touch again to stop' : 'Stop sharing'}</button></div>
+    <div class="row"><input class="txt" id="shName" maxlength="20" placeholder="Your name" value="${esc(S.share.name || '')}" aria-label="Your name"><label class="chk" for="shSendOn"><input type="checkbox" id="shSendOn" ${S.share.send ? 'checked' : ''}>Send mine</label></div>
+    <p class="fine num" id="shStatus">${esc(SH.status || (S.share.send ? (S.share.sent ? 'Your position went out ' + ago(S.share.sent) + '.' : watchId === null ? 'Touch the target button on the map to start GPS. Then your position goes out.' : 'Waiting for the first GPS position.') : 'You only watch. Your position does not go out.'))}</p>
+    ${peers ? `<ol class="list">${peers}</ol>` : '<p class="fine">No other person has sent a position with this code in the last 12 hours.</p>'}
+    <p class="fine">Positions go through the public service ntfy.sh, which keeps them for 12 hours. They are encrypted with the code. Each person who has the code can see them.</p>`;
+}
+function shareUi() { const el = $('shareBox'); if (el && !el.contains(document.activeElement)) el.innerHTML = shareHtml(); else if ($('shStatus') && SH.status) $('shStatus').textContent = SH.status; }
+function shareStart(code, name) {
+  S.share = { code: cleanCode(code), name: (name || '').trim() || S.shareName || '', send: true, since: 0 };
+  S.shareName = S.share.name; S.peers = {}; SH.seen = {}; SH.keys = null; SH.lastPub = 0; SH.status = ''; save();
+  shareLoop(); sharePoll(); if (me && me.src !== 'manual') sharePublish(true);
+}
+function shareLoop() { clearInterval(SH.timer); if (S.share) SH.timer = setInterval(sharePoll, 60e3); }
+async function shareLink() {
+  const url = location.origin + location.pathname + '#join-' + S.share.code, text = 'Follow me on the Queen Charlotte Track. Open this link, write your name and touch Join. Code: ' + prettyCode(S.share.code);
+  try { if (navigator.share) { await navigator.share({ title: 'Queen Charlotte Track 3D', text, url }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text + ' ' + url); toast('Link copied. Paste it into a message.', 4000); }
+  catch (e) { showCard({ kindHtml: 'Share link', title: prettyCode(S.share.code), text: url, fly: false }); }
+}
+function wireShare() {
+  const p = $('p-track');
+  p.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.id !== 'shStop') SH.armed = false;
+    const name = $('shName') ? $('shName').value : '';
+    if (b.id === 'shNew') { const a = crypto.getRandomValues(new Uint8Array(12)); shareStart([...a].map(x => CODE_CHARS[x % 32]).join(''), name); renderTrack(); shareLink(); }
+    else if (b.id === 'shJoin') { const c = cleanCode($('shCode').value); if (c.length < 8) { toast('Write the full code first'); return; } shareStart(c, name); renderTrack(); toast('Joined. Positions show on the map when they arrive.', 4000); }
+    else if (b.id === 'shSend') shareLink();
+    else if (b.id === 'shNow') { if (me && me.src !== 'manual') { sharePublish(true); toast('Sending your position…'); } else { $('locBtn').click(); } sharePoll(); }
+    else if (b.id === 'shStop') { if (!SH.armed) { SH.armed = true; shareUi(); } else { SH.armed = false; S.share = null; S.peers = {}; save(); shareLoop(); drawPeers(); renderTrack(); toast('Sharing is off'); } }
+    else if (b.dataset.peer) showPeer(b.dataset.peer);
+  });
+  p.addEventListener('change', e => {
+    if (e.target.id === 'shName') { S.shareName = e.target.value.trim(); if (S.share) { S.share.name = S.shareName; sharePublish(true); } save(); }
+    if (e.target.id === 'shSendOn' && S.share) { S.share.send = e.target.checked; save(); if (S.share.send) sharePublish(true); shareUi(); }
+  });
+}
+
 // ---------- heart rate from a watch (Web Bluetooth: Chrome on Android)
 const HR = { dev: null, bpm: null, t: 0, max: 0, state: 'off', tries: 0 };
 const hasBle = () => !!(navigator.bluetooth && navigator.bluetooth.requestDevice);
@@ -502,6 +637,7 @@ function setMe(lat, lon, acc, src, forceDay, speed) {
     }
   }
   drawMe(); renderTrack();
+  if (S.share) sharePublish(src === 'manual');
   if (S.tab === 'days') renderDays();
 }
 function announceNear(day) {
@@ -548,6 +684,8 @@ function paceInfo(day) {
 function renderTrack() {
   const day = days[trackDay()], on = watchId !== null, isToday = todayIndex() !== null, pi = paceInfo(day);
   const oldTxt = $('momentTxt') ? $('momentTxt').value : '', hadFocus = document.activeElement && document.activeElement.id === 'momentTxt';
+  const keep = {}, focusId = document.activeElement && document.activeElement.id;
+  for (const id of ['shName', 'shCode']) if ($(id)) keep[id] = $(id).value;
   let status;
   if (gpsMsg) status = gpsMsg;
   else if (me && me.day === null) status = me.off > 3000 ? 'You are ' + Math.round(me.off / 1000) + ' km from the track.' : 'You are at km ' + me.km.toFixed(1) + ' of the track.';
@@ -570,6 +708,8 @@ function renderTrack() {
     </div>
     ${day.boat && isToday ? (() => { const eta = pi ? pi.eta : day.tEnd, sp = (day.boat - eta) / 60e3; return `<p class="boatline ${sp < 20 ? 'late' : ''} num">${badge('boat')}Boat leaves Anakiwa at ${W.fmtTime(day.boat)}. ${sp >= 0 ? 'At this speed you have ' + durTxt(sp / 60) + ' spare.' : 'At this speed you are ' + durTxt(-sp / 60) + ' late. Call the office: ' + HELP.office + '.'}</p>`; })() : ''}
     ${isToday && light !== null && light > 0 ? `<p class="fine num">Sunset is at ${W.fmtTime(sun.set)}. You have ${durTxt(light)} of daylight.</p>` : ''}
+    <h3 class="t">Share my position</h3>
+    <div id="shareBox" class="sharebox">${shareHtml()}</div>
     <h3 class="t">Set your position by hand · day ${day.i + 1}</h3>
     <input type="range" class="plain" id="manual" min="0" max="${Math.round(day.dist)}" step="50" value="${Math.round(manualD)}" aria-label="Position on the route">
     <div class="row" style="justify-content:space-between"><span class="num" id="manualTxt">${kmTxt(manualD)} km · ${Math.round(mp.ele)} m${nearPoi && Math.abs(nearPoi.d - manualD) < 400 ? ' · ' + esc(nearPoi.p.name) : ''}</span><button class="btn sea" id="checkin">Check in here</button></div>
@@ -585,6 +725,7 @@ function renderTrack() {
     <label class="chk" for="wake"><input type="checkbox" id="wake" ${wake ? 'checked' : ''}>Keep the screen on</label>
     <p class="fine">A web app records your position only while it is open on the screen. Open it at each stop. Replay joins your check-ins along the track. Check-ins stay on this phone.</p>`;
   hrUi();
+  for (const id in keep) if ($(id)) { $(id).value = keep[id]; if (focusId === id) { $(id).focus(); try { $(id).setSelectionRange(keep[id].length, keep[id].length); } catch (e) { /* ignore */ } } }
   if (oldTxt) $('momentTxt').value = oldTxt;
   if (hadFocus) { const el = $('momentTxt'); el.focus(); try { el.setSelectionRange(oldTxt.length, oldTxt.length); } catch (e) { /* ignore */ } }
 }
@@ -831,7 +972,7 @@ function init() {
   if (S.nights.some(id => !STOPS[id])) S.nights = DEFAULT_NIGHTS.slice();
   buildDays(); sel = Math.min(sel, days.length - 1);
   buildStaticMarkers(); buildStopMarkers(); buildMomentMarkers(); drawRoutes(); updateHud(); buildTimebar();
-  wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile();
+  wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile(); wireShare();
   $('helpBtn').addEventListener('click', showHelp);
   $('hrPill').addEventListener('click', () => setTab('track'));
   $('locBtn').addEventListener('click', () => {
@@ -842,8 +983,16 @@ function init() {
   });
   const last = S.checkins[S.checkins.length - 1];
   if (last && last.day === trackDay() && Date.now() - last.t < 18 * W.HOUR) me = { lat: last.lat, lon: last.lon, t: last.t, day: last.day, d: last.d, off: 0, src: last.src === 'm' ? 'manual' : 'gps' };
+  const jm = /^#join-([A-Za-z0-9-]{8,24})$/.exec(location.hash);
+  if (jm && window.crypto && crypto.subtle) {
+    const c = cleanCode(jm[1]);
+    if (!S.share || S.share.code !== c) { S.share = { code: c, name: S.shareName || '', send: false, since: 0 }; S.peers = {}; S.tab = 'track'; save(); setTimeout(() => toast('You joined the share code. Write your name in the Track tab.', 6000), 1500); }
+    try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
+  }
   setTab(S.tab);
   applyEnv(); updateTimeUI(true); drawMe();
+  if (S.share && window.crypto && crypto.subtle) { drawPeers(); shareLoop(); sharePoll(); } else if (S.share) S.share = null;
+  window.addEventListener('online', () => { if (S.share) { sharePoll(); sharePublish(true); } });
 
   $('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab, true); });
   $('scrub').addEventListener('input', e => { R.playing = false; setTime(W.T0 + +e.target.value * 600e3, 'scrub'); if (S.tab === 'replay') renderReplay(); });
@@ -857,6 +1006,7 @@ function init() {
   document.addEventListener('visibilitychange', async () => {
     if (!document.hidden && wake === null && $('wake') && $('wake').checked) { try { wake = await navigator.wakeLock.request('screen'); } catch (e) { /* ignore */ } }
     if (!document.hidden && navigator.onLine !== false && Date.now() - Date.parse(W.WX.fetched) > 3 * W.HOUR) refreshWx(true);
+    if (!document.hidden && S.share) { sharePoll(); SH.lastPub = Math.min(SH.lastPub, Date.now() - 11 * 60e3); } // send again soon after the app comes back
   });
   layout();
   scene.flyTo({ x: 0, z: 0, dist: 520, az: 0.5, polar: 0.75, dur: 0 });

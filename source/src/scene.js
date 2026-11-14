@@ -288,6 +288,11 @@ export function createScene(canvas, labelRoot) {
     for (const pts of list || []) if (pts.length > 1) walked.push(makeLine(pts, '#ffffff', 2, { depthTest: false, order: 4, opacity: 0.95 }));
   }
 
+  let peerTrails = [];
+  function setPeerTrails(list) {
+    disposeLines(peerTrails); peerTrails = [];
+    for (const pts of list || []) if (pts.length > 1) peerTrails.push(makeLine(pts, '#58d6c3', 2.4, { depthTest: false, order: 4, opacity: 0.9 }));
+  }
   // ---- lights at lodges, walker beacon, ghost
   const lodgeLights = [];
   function addLodgeLight(p) {
@@ -378,7 +383,7 @@ export function createScene(canvas, labelRoot) {
     camera.aspect = w / h;
     camera.setViewOffset(w, h, 0, (sheet - top) / 2, w, h);
     camera.updateProjectionMatrix();
-    for (const l of lines.concat(walked)) l.material.resolution.set(w, h);
+    for (const l of lines.concat(walked, peerTrails)) l.material.resolution.set(w, h);
   }
 
   let chaseState = null;
@@ -441,7 +446,7 @@ export function createScene(canvas, labelRoot) {
 
   setSpherical(new THREE.Vector3(0, 0, 0), 520, 0.5, 0.75);
   return {
-    camera, controls, tick, setEnv, setSize, flyTo, frame, setRoutes, setWalked, setWalker, setGhost, addMarker, clearMarkers,
+    camera, controls, tick, setEnv, setSize, flyTo, frame, setRoutes, setWalked, setPeerTrails, setWalker, setGhost, addMarker, clearMarkers,
     addLodgeLight, clearLodgeLights, chase, getSpherical,
     resetNorth() { const s = getSpherical(); flyTo({ x: controls.target.x, z: controls.target.z, az: 0, dur: 700, dist: s.r, polar: s.phi }); },
     azimuth() { return getSpherical().theta; },
