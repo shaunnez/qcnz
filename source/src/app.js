@@ -36,7 +36,7 @@ const kmTxt = m => (m / 1000).toFixed(1);
 const durTxt = h => { const m = Math.round(h * 60); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + W.p2(m % 60); };
 
 // ---------- saved data (this device only)
-const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {}, photoBy: '', share: null, peers: {}, shareName: '', devId: '' }, (() => {
+const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {}, layers: { topo: false, contours: true, feat: true }, photoBy: '', share: null, peers: {}, shareName: '', devId: '' }, (() => {
   try {
     const cur = localStorage.getItem(KEY);
     if (cur) return JSON.parse(cur);
@@ -82,7 +82,7 @@ function buildDays() {
     pts[0].d = 0;
     for (let k = 1; k < pts.length; k++) {
       d += pts[k].km !== undefined && pts[k - 1].km !== undefined ? (pts[k].km - pts[k - 1].km) * 1000 : G.distM(pts[k - 1].lat, pts[k - 1].lon, pts[k].lat, pts[k].lon); pts[k].d = d;
-      if (pts[k].ele - ref > 6) { up += pts[k].ele - ref; ref = pts[k].ele; } else if (ref - pts[k].ele > 6) ref = pts[k].ele;
+      if (pts[k].ele - ref > 5) { up += pts[k].ele - ref; ref = pts[k].ele; } else if (ref - pts[k].ele > 5) ref = pts[k].ele;
     }
     const guide = GUIDE[seq[i] + '>' + seq[i + 1]] || null;
     const hours = guide ? guide.h[1] : (d / 4000 + up / 600) * 1.2, date = DAY0 + i * W.DAYMS;
@@ -330,8 +330,9 @@ function renderDays() {
     ${day.guide ? `<h3 class="t">Know before you go</h3><ul class="notes">${day.guide.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
     <h3 class="t">On the way</h3>
     <ol class="list">${pois}</ol>
+    ${FEAT.data ? `<p class="fine num">${FEAT.data.cross.filter(c => c.km >= day.fromKm && c.km <= day.toKm).length} mapped streams cross the track on this day. Zoom in on the map to see them as blue dots.</p>` : ''}
     <div class="tonight"><b>${day.toId === 'anakiwa' ? 'Finish' : 'Tonight'}: ${esc(day.to.name)}</b><p>${esc(day.to.note)}</p></div>
-    <p class="fine">Times, facilities and route notes: Wilderness Guides route guide. Distances are measured on this map. Use Change plan if your lodges are different. Track line and places: OpenStreetMap contributors.</p>`;
+    <p class="fine">Times, facilities and route notes: Wilderness Guides route guide. Distances are measured on this map. Use Change plan if your lodges are different. Track line and places: OpenStreetMap contributors. Heights, Topo50 map and topo features: sourced from LINZ, CC BY 4.0.</p>`;
 }
 function wireDays() {
   const p = $('p-days');
@@ -417,6 +418,77 @@ function wireSky() {
     else if (b.dataset.t) { setTime(+b.dataset.t, 'scrub'); renderSky(); }
     else if (b.id === 'wxRefresh') refreshWx(false);
   });
+}
+
+// ---------- grid reference: NZTM2000, the system of the Topo50 maps
+function nztm(lat, lon) {
+  const a = 6378137, f = 1 / 298.257222101, k0 = 0.9996, e2 = 2 * f - f * f, phi = lat * Math.PI / 180, w = (lon - 173) * Math.PI / 180;
+  const A0 = 1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 ** 3 / 256, A2 = 3 / 8 * (e2 + e2 * e2 / 4 + 15 * e2 ** 3 / 128), A4 = 15 / 256 * (e2 * e2 + 3 * e2 ** 3 / 4), A6 = 35 * e2 ** 3 / 3072;
+  const m = a * (A0 * phi - A2 * Math.sin(2 * phi) + A4 * Math.sin(4 * phi) - A6 * Math.sin(6 * phi));
+  const sn = Math.sin(phi), c = Math.cos(phi), t = Math.tan(phi), t2 = t * t, rho = a * (1 - e2) / Math.pow(1 - e2 * sn * sn, 1.5), nu = a / Math.sqrt(1 - e2 * sn * sn), psi = nu / rho;
+  const E = 1600000 + k0 * nu * w * c * (1 + w * w / 6 * c * c * (psi - t2) + w ** 4 / 120 * c ** 4 * (4 * psi ** 3 * (1 - 6 * t2) + psi * psi * (1 + 8 * t2) - psi * 2 * t2 + t2 * t2) + w ** 6 / 5040 * c ** 6 * (61 - 479 * t2 + 179 * t2 * t2 - t2 ** 3));
+  const N = 10000000 + k0 * (m + nu * sn * c * (w * w / 2 + w ** 4 / 24 * c * c * (4 * psi * psi + psi - t2) + w ** 6 / 720 * c ** 4 * (8 * psi ** 4 * (11 - 24 * t2) - 28 * psi ** 3 * (1 - 6 * t2) + psi * psi * (1 - 32 * t2) - psi * 2 * t2 + t2 * t2) + w ** 8 / 40320 * c ** 6 * (1385 - 3111 * t2 + 543 * t2 * t2 - t2 ** 3)));
+  return { e: E, n: N };
+}
+function gridRef(lat, lon) {
+  const g = nztm(lat, lon), E = Math.round(g.e), N = Math.round(g.n);
+  const col = 28 + Math.floor((E - 1660000) / 24000), row = N >= 5442000 && N < 5478000 ? 'BP' : N >= 5406000 && N < 5442000 ? 'BQ' : '';
+  const six = String(Math.floor(E / 100) % 1000).padStart(3, '0') + ' ' + String(Math.floor(N / 100) % 1000).padStart(3, '0');
+  return { E, N, sheet: row && col >= 26 && col <= 30 ? row + col : '', six };
+}
+function posText(lat, lon) {
+  const g = gridRef(lat, lon);
+  return `NZTM E ${g.E} N ${g.N}` + (g.sheet ? ` · Topo50 ${g.sheet} ${g.six}` : '') + ` · ${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+}
+
+// ---------- map layers: Topo50 skin, contour lines, topo features
+const FEAT = { data: null, kinds: {
+  wharf: { label: 'Wharf', far: 95, text: 'Wharf or jetty from the Topo50 data. Many are private. With no phone signal, you can hail a passing boat from a jetty.' },
+  boatramp: { label: 'Boat ramp', far: 95, text: 'Boat ramp from the Topo50 data.' },
+  peak: { label: 'Spot height', far: 170 }, trig: { label: 'Trig station', far: 200, text: 'Survey mark from the Topo50 data.' },
+  homestead: { label: 'Homestead', far: 150, text: 'Homestead from the Topo50 data. This is private land.' },
+  beacon: { label: 'Light', far: 220, text: 'Navigation light for boats.' }, wreck: { label: 'Wreck', far: 220, text: 'Shipwreck from the Topo50 data.' },
+  waterfall_pt: { label: 'Waterfall', far: 150, text: 'Waterfall from the Topo50 data.' },
+  cross: { label: 'Stream', far: 60, text: 'A mapped stream crosses the track here. Small streams can be dry in summer. Treat water from streams before you drink it.' } } };
+function applyLayers(first) {
+  const L = S.layers;
+  scene.setLayers({ topo: L.topo, contours: L.contours }, st => {
+    if (st === 'loading') toast('Loading the Topo50 map…', 6000);
+    else if (st === 'ready') toast('Topo50 map is on', 2500);
+    else if (st === 'error') { S.layers.topo = false; save(); toast('The Topo50 map did not load. Try again with a connection.', 5000); }
+  });
+  scene.showFeatureLines(L.feat && !L.topo);
+  if (!first) drawFeatures();
+}
+async function loadFeatures() {
+  try { const r = await fetch('topofeat.json'); if (!r.ok) return; FEAT.data = await r.json(); } catch (e) { return; }
+  const d = FEAT.data, seg = list => { const out = []; for (const ln of list) for (let i = 0; i + 3 < ln.length; i += 2) { const a = G.world({ lon: ln[i], lat: ln[i + 1] }, 0.22), b = G.world({ lon: ln[i + 2], lat: ln[i + 3] }, 0.22); out.push(a.x, a.y, a.z, b.x, b.y, b.z); } return out; };
+  scene.setFeatureLines([{ seg: seg(d.streams), color: '#7cc8ff', width: 1.3, opacity: 0.85 }, { seg: seg(d.roads), color: '#f4e7bd', width: 2, opacity: 0.9 }, { seg: seg(d.tracks), color: '#f4e7bd', width: 1.4, opacity: 0.9, dashed: true }]);
+  scene.showFeatureLines(S.layers.feat && !S.layers.topo);
+  drawFeatures(); if (S.tab === 'days') renderDays();
+}
+function drawFeatures() {
+  scene.clearMarkers('feat');
+  if (!FEAT.data || !S.layers.feat) return;
+  const add = (k, p, name, ele) => {
+    const K = FEAT.kinds[k]; if (!K) return;
+    const w = G.world({ lat: p.la, lon: p.lo }, 0.7), tap = !!K.text;
+    const inner = k === 'peak' ? `<span>${Math.round(ele)}</span>` : k === 'trig' ? `<button><svg viewBox="0 0 12 12"><path d="M6 1.5 11 10.5H1z" fill="none" stroke="#fff" stroke-width="1.4"/><circle cx="6" cy="7.4" r="1" fill="#fff"/></svg>${ele ? Math.round(ele) : ''}</button>`
+      : k === 'wharf' || k === 'boatramp' ? '<button aria-label="Wharf"><i class="wh"></i></button>' : k === 'cross' ? '<button aria-label="Stream"><i class="st"></i></button>' : `<button>${esc(name || K.label)}</button>`;
+    const el = mkEl('feat f-' + k, inner);
+    if (tap && el.firstChild.tagName === 'BUTTON') el.firstChild.addEventListener('click', () => showCard({ kindHtml: K.label + ' · Topo50', title: name && k !== 'trig' ? name : K.label + (ele ? ' ' + Math.round(ele) + ' m' : ''), text: K.text + (k === 'cross' ? ' Track km ' + p.km + '.' : ''), meta: posText(p.la, p.lo), x: w.x, z: w.z }));
+    scene.addMarker({ el, ...w, pri: k === 'peak' || k === 'trig' ? 8 : 5, far: K.far, group: 'feat', w: k === 'peak' ? 26 : 0, h: 14 });
+  };
+  for (const p of FEAT.data.pts) add(p.k, p, p.n, p.e);
+  for (const c of FEAT.data.cross) add('cross', c, c.n);
+}
+function showLayers() {
+  const L = S.layers, sw = (id, on, a, b) => `<span class="seg" role="group"><button data-lay="${id}:1" aria-pressed="${on}">${a}</button><button data-lay="${id}:0" aria-pressed="${!on}">${b}</button></span>`;
+  showCard({ kindHtml: 'Map layers', title: 'What the map shows', fly: false,
+    html: `<span class="layrow"><b>Map</b>${sw('topo', L.topo, 'Topo50', 'Painted')}</span>
+      <span class="layrow"><b>Contour lines</b>${sw('contours', L.contours, 'On', 'Off')}</span>
+      <span class="layrow"><b>Topo features</b>${sw('feat', L.feat, 'On', 'Off')}</span>
+      <span class="facrow">Topo50 is the LINZ 1:50,000 map. It has its own contour lines, so the app draws its lines only on the painted map: a thin line each 20 m and a strong line each 100 m. Topo features are streams, roads, other tracks, wharves and spot heights. Zoom in to see them. Sourced from LINZ. CC BY 4.0.</span>` });
 }
 
 // ---------- photos: read time and GPS, pin them to the trail
@@ -740,7 +812,7 @@ function peerLine(p) {
 function showPeer(id) {
   const p = S.peers[id]; if (!p) return;
   const w = G.inBounds(p.lat, p.lon) ? G.world(p) : null;
-  showCard({ kindHtml: 'Shared position', title: p.n, text: 'Last position: ' + W.fmtDay(p.t) + ' at ' + W.fmtTime(p.t) + ', ' + peerLine(p) + '. ' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '.', x: w ? w.x : undefined, z: w ? w.z : undefined });
+  showCard({ kindHtml: 'Shared position', title: p.n, text: 'Last position: ' + W.fmtDay(p.t) + ' at ' + W.fmtTime(p.t) + ', ' + peerLine(p) + '. ' + posText(p.lat, p.lon) + '.', x: w ? w.x : undefined, z: w ? w.z : undefined });
 }
 function shareHtml() {
   if (!window.crypto || !crypto.subtle) return '<p class="fine">Position sharing needs the app at its web address. It cannot work in this preview.</p>';
@@ -832,7 +904,7 @@ function hrDisconnect() { HR.state = 'off'; HR.bpm = null; try { HR.dev && HR.de
 // ---------- Track me panel
 let watchId = null, gpsMsg = '', wake = null, manualD = null, wantFly = false, clearArmed = false;
 const BUILD = typeof __BUILD__ === 'string' ? __BUILD__ : 'dev';
-const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'heights.png', 'topofeat.json', 'topo.webp'];
 async function updateApp() {
   toast('Downloading the app again…', 8000);
   try {
@@ -1074,6 +1146,7 @@ function wireProfile() {
 function showHelp() {
   showCard({ kindHtml: badge('boat') + 'Help', title: 'If something goes wrong', fly: false,
     html: `<ul class="notes">${HELP.lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>
+      <span class="facrow posrow"><b>Your position</b><span class="num" id="helpPos">${me && me.src !== 'manual' ? esc(posText(me.lat, me.lon)) + ' · GPS ' + ago(me.t) : 'Touch the target button on the map to start GPS. Your grid reference then shows here.'}</span>${me && me.src !== 'manual' ? '<button class="btn" id="posCopy">Copy position</button>' : ''}</span>
       <span class="facrow"><a class="btn pri" href="tel:111">Call 111</a> <a class="btn" href="tel:${HELP.office.replace(/ /g, '')}">Office ${HELP.office}</a></span>
       <span class="facrow"><button class="btn" id="updBtn2">Update app</button> App version: ${BUILD}</span>
       <span class="facrow">Office from an overseas phone: ${HELP.officeIntl}. Luggage for the boat: 15 kg at most. There are no rubbish bins on the track: carry all waste out.</span>` });
@@ -1210,6 +1283,8 @@ function init() {
   buildDays(); sel = Math.min(sel, days.length - 1);
   buildStaticMarkers(); buildStopMarkers(); buildMomentMarkers(); drawRoutes(); updateHud(); buildTimebar();
   wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile(); wireShare(); wirePhotos(); loadPhotos();
+  if (!S.layers || typeof S.layers !== 'object') S.layers = { topo: false, contours: true, feat: true };
+  scene.loadHeights(); applyLayers(true); loadFeatures();
   $('helpBtn').addEventListener('click', showHelp);
   $('hrPill').addEventListener('click', () => setTab('track'));
   $('locBtn').addEventListener('click', () => {
@@ -1237,7 +1312,13 @@ function init() {
   $('wxChip').addEventListener('click', () => setTab('sky'));
   $('compass').addEventListener('click', () => scene.resetNorth());
   $('cardClose').addEventListener('click', hideCard);
-  $('card').addEventListener('click', e => { if (e.target.id === 'updBtn2') updateApp(); });
+  $('card').addEventListener('click', async e => {
+    const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'updBtn2') updateApp();
+    else if (t.id === 'posCopy' && me) { try { await navigator.clipboard.writeText('My position: ' + posText(me.lat, me.lon) + ' (' + W.fmtDay(me.t) + ' ' + W.fmtTime(me.t) + ')'); toast('Position copied'); } catch (er) { toast('Copy did not work. Read the numbers from the card.'); } }
+    else if (t.dataset.lay) { const [k, v] = t.dataset.lay.split(':'); S.layers[k] = v === '1'; save(); applyLayers(); showLayers(); }
+  });
+  $('layBtn').addEventListener('click', showLayers);
   window.addEventListener('resize', layout);
   if (window.ResizeObserver) new ResizeObserver(layout).observe($('sheet'));
   document.addEventListener('visibilitychange', async () => {
@@ -1277,6 +1358,6 @@ function init() {
     scene.tick(now, dt);
   }
   requestAnimationFrame(loop);
-  window.__qct = { scene, days, setTime, selectDay, setTab, startReplay, S };
+  window.__qct = { scene, days, setTime, selectDay, setTab, startReplay, S, nztm, applyLayers };
 }
 init();

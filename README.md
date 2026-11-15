@@ -20,7 +20,8 @@ The app then works offline. The forecast updates when there is a connection.
 ## Data
 
 - Track line and places: OpenStreetMap contributors (ODbL).
-- Heights: Mapzen terrain tiles on AWS.
+- Heights: LINZ 1 m LiDAR model (Marlborough 2020-2022) and LINZ 8 m contour model, averaged to 8 m. Sourced from LINZ. CC BY 4.0.
+- Topo50 map image (`topo.webp`) and topo features (`topofeat.json`): LINZ Basemaps. Sourced from LINZ. CC BY 4.0.
 - Forecast: Open-Meteo.
 - Section times, facilities and route notes: the Wilderness Guides Marlborough Sounds route guide, in my own words.
 

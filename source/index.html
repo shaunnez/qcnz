@@ -69,8 +69,8 @@ h1,h2,h3{text-wrap:balance}
 .chip small{display:block;font-size:11px;color:var(--mute);line-height:1.15;text-align:left}
 #compass{width:40px;height:40px;border-radius:50%;background:var(--glass);border:1px solid var(--edge);display:grid;place-items:center;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 #compass svg{width:24px;height:24px}
-#locBtn{width:40px;height:40px;border-radius:50%;background:var(--glass);border:1px solid var(--edge);display:grid;place-items:center;color:var(--text);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-#locBtn svg{width:22px;height:22px}
+#locBtn,#layBtn{width:40px;height:40px;border-radius:50%;background:var(--glass);border:1px solid var(--edge);display:grid;place-items:center;color:var(--text);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+#locBtn svg,#layBtn svg{width:22px;height:22px}
 #locBtn.on{background:#fff;color:#0c2227;border-color:#fff}
 
 /* card for a place */
@@ -224,6 +224,14 @@ input[type=range].plain::-moz-range-thumb{width:18px;height:18px;border-radius:5
 #photoFlash.on{opacity:1;transform:translate(-50%,0) rotate(-2deg)}
 #pfImg{width:170px;height:170px;object-fit:cover;border-radius:3px;display:block}
 #pfCap{font-size:11.5px;color:#22383c;font-weight:600}
+.mk.feat>span{font:italic 500 10.5px/1 var(--f-chart);color:#f3ead0;text-shadow:0 1px 3px #000,0 0 6px rgba(0,0,0,.8);transform:translate(-50%,-50%)}
+.mk.feat>button{pointer-events:auto;display:flex;align-items:center;gap:3px;padding:5px;font-size:10.5px;font-weight:600;color:#fff;text-shadow:0 1px 3px #000,0 0 6px rgba(0,0,0,.8);transform:translate(-50%,-50%)}
+.mk.feat svg{width:11px;height:11px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.8))}
+.mk.feat i.wh{display:block;width:9px;height:9px;border-radius:2px;background:#ff9c8f;border:1.5px solid #3a0f0a;transform:rotate(45deg)}
+.mk.feat i.st{display:block;width:8px;height:8px;border-radius:50%;background:#7cc8ff;border:1.5px solid #06304a}
+.layrow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:9px;font-size:14px;color:var(--text)}
+.posrow{flex-direction:column;align-items:flex-start;color:#d5e3de;font-size:13px}
+.posrow b{color:var(--amber)}
 #hrPill{padding:6px 11px;border-radius:999px;background:var(--glass);border:1px solid rgba(249,168,200,.6);color:#ffd3e2;font-size:13px;font-weight:700;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 #hrPill[hidden]{display:none}
 @media (max-width:360px){.stats b{font-size:17px}.spot{grid-template-columns:1fr}}
@@ -247,6 +255,9 @@ input[type=range].plain::-moz-range-thumb{width:18px;height:18px;border-radius:5
     </button>
     <button id="locBtn" aria-label="Show my position on the map">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></svg>
+    </button>
+    <button id="layBtn" aria-label="Map layers">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3.5 21 8l-9 4.5L3 8z"/><path d="M3 12l9 4.5 9-4.5M3 16l9 4.5 9-4.5"/></svg>
     </button>
     <button id="helpBtn" aria-label="Help and phone numbers">Help</button>
     <button id="hrPill" class="num" aria-label="Heart rate" hidden>♥ –</button>

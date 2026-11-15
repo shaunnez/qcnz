@@ -3,6 +3,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import * as G from './geo.js';
 import { sunPos } from './weather.js';
 
@@ -67,7 +69,8 @@ export function createScene(canvas, labelRoot) {
     uSun: { value: new THREE.Vector3(0.3, 0.8, -0.4) }, uSunCol: { value: col('#fff0d2') }, uAmb: { value: col('#66747f') },
     uFog: { value: col('#bedbea') }, uFogD: { value: 0.0012 }, uHalf: { value: half }, uSky: { value: col('#3a84cc') },
     uCloud: { value: 0.2 }, uTime: { value: 0 }, uWind: { value: new THREE.Vector2(1, 0) }, uWindS: { value: 0.3 },
-    uWet: { value: 0 }, uNight: { value: 0 }, uRealSun: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 1 }
+    uWet: { value: 0 }, uNight: { value: 0 }, uRealSun: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 1 },
+    uHt: { value: null }, uHasHt: { value: 0 }, uHtPx: { value: new THREE.Vector2(1 / 2048, 1 / 1608) }, uTopo: { value: null }, uTopoMix: { value: 0 }, uContour: { value: 0 }, uVex: { value: G.VEX / 100 }
   };
 
   // ---- terrain
@@ -92,31 +95,66 @@ export function createScene(canvas, labelRoot) {
     vertexShader: `attribute float aH; varying vec3 vW; varying vec3 vN; varying float vH;
       void main(){ vH=aH; vN=normal; vW=position; gl_Position=projectionMatrix*viewMatrix*vec4(position,1.); }`,
     fragmentShader: `precision highp float;
-      uniform vec3 uSun, uSunCol, uAmb; uniform float uCloud, uTime, uWet, uNight; uniform vec2 uWind;
+      uniform vec3 uSun, uSunCol, uAmb; uniform float uCloud, uTime, uWet, uNight, uHasHt, uTopoMix, uContour, uVex; uniform vec2 uWind, uHtPx;
+      uniform sampler2D uHt, uTopo;
       varying vec3 vW; varying vec3 vN; varying float vH;
       ${NOISE}${FOG}
+      float hAt(vec2 uv){ vec4 t=texture2D(uHt,uv); return (t.r*65280.+t.g*255.)/50.; }
+      float cline(float h, float st, float lim){ float f=h/st, w=fwidth(f); float d=abs(fract(f-.5)-.5)/max(w,1e-5); return (1.-smoothstep(.7,1.7,d))*(1.-smoothstep(lim*.5,lim,w)); }
       void main(){
-        vec3 n=normalize(vN); float slope=1.-n.y; vec3 c;
+        vec3 n=normalize(vN); vec3 c; float h=vH;
+        vec2 uv=vW.xz/(2.*uHalf)+.5;
+        bool wet=vH<0.;
+        if(uHasHt>.5){ float hc=hAt(uv); wet=hc<.3 && vH<14.; if(!wet) h=hc>=.3?hc:max(vH,.6); }
+        if(uHasHt>.5 && !wet){
+          // height and slope from the LINZ height image, about 20 m for each pixel
+          h=hAt(uv);
+          float hx=hAt(uv+vec2(uHtPx.x,0.))-hAt(uv-vec2(uHtPx.x,0.)), hz=hAt(uv+vec2(0.,uHtPx.y))-hAt(uv-vec2(0.,uHtPx.y));
+          vec3 nd=normalize(vec3(-hx*uVex/(4.*uHalf.x*uHtPx.x), 1., -hz*uVex/(4.*uHalf.y*uHtPx.y)));
+          float far=smoothstep(60.,420.,length(vW-cameraPosition));
+          n=normalize(mix(nd,n,far*.55));
+        }
+        float slope=1.-n.y;
         float t=fbm(vW.xz*.42), t2=noise(vW.xz*2.6);
-        if(vH<0.){
+        if(wet){
           float d=clamp(-vH/70.,0.,1.);
           c=mix(vec3(.38,.80,.72), vec3(.02,.19,.27), smoothstep(0.,1.,sqrt(d)));
+          if(vH>=0.) c=vec3(.13,.40,.45); // water pixel on a mesh cell that is above the water plane
         } else {
           vec3 bush=mix(vec3(.09,.27,.17), vec3(.25,.50,.25), t*.75+t2*.25);
           bush=mix(bush, vec3(.13,.30,.24), smoothstep(.25,.6,n.z*.5+.5)*.35);
-          c=mix(bush, vec3(.44,.47,.27), smoothstep(620.,980.,vH+t*180.));
+          if(uHasHt>.5){
+            // land cover from the topo data: open land, scrub, forest
+            float cov=texture2D(uHt,uv).b;
+            vec3 open=mix(vec3(.50,.58,.28), vec3(.66,.67,.36), t*.6+t2*.4);
+            vec3 scrub=mix(vec3(.24,.38,.20), vec3(.40,.50,.27), t2);
+            bush=mix(mix(open,scrub,smoothstep(.06,.42,cov)), bush, smoothstep(.56,.94,cov));
+          }
+          c=mix(bush, vec3(.44,.47,.27), smoothstep(620.,980.,h+t*180.));
           c=mix(c, vec3(.46,.43,.37), smoothstep(.5,.78,slope+t*.12));
-          c=mix(vec3(.88,.81,.62), c, smoothstep(1.2,7.,vH+t*4.));
+          c=mix(vec3(.88,.81,.62), c, smoothstep(1.2,7.,h+t*4.));
+          if(uContour>.5){
+            float cl=max(cline(h,20.,.3)*.34, cline(h,100.,.5)*.62)*step(2.,h);
+            c=mix(c, vec3(.96,.90,.70), cl);
+          }
         }
         float cs=fbm(vW.xz*.011+uWind*uTime*.03);
         float shade=1.-uCloud*.6*smoothstep(.40,.62,cs);
         float dif=max(dot(n,uSun),0.)*shade;
         float rim=pow(max(dot(n,uSun)*.5+.5,0.),2.)*.25;
-        vec3 lit=c*(uAmb*(1.55+rim)+uSunCol*dif*1.05);
+        vec3 light=uAmb*(1.55+rim)+uSunCol*dif*1.05;
+        vec3 lit=c*light;
         lit*=1.-uWet*.16;
+        if(uTopoMix>0.){
+          // the printed map: keep it readable, with soft relief shade
+          vec3 tp=texture2D(uTopo,uv).rgb;
+          float L=clamp(dot(light,vec3(.34)),.3,1.2);
+          lit=mix(lit, tp*mix(1.,L,.5), uTopoMix);
+        }
         gl_FragColor=vec4(applyFog(lit,vW),1.);
       }`
   }));
+  terrain.material.extensions = { derivatives: true };
   terrain.frustumCulled = false;
   scene.add(terrain);
 
@@ -126,7 +164,7 @@ export function createScene(canvas, labelRoot) {
     uniforms: U, transparent: true, depthWrite: false,
     vertexShader: `varying vec3 vW; void main(){ vW=position; gl_Position=projectionMatrix*viewMatrix*vec4(position,1.); }`,
     fragmentShader: `precision highp float;
-      uniform vec3 uSun, uSunCol, uAmb, uSky, uRealSun; uniform float uTime, uWindS, uCloud, uSunVis; uniform vec2 uWind;
+      uniform vec3 uSun, uSunCol, uAmb, uSky, uRealSun; uniform float uTime, uWindS, uCloud, uSunVis, uTopoMix, uHasHt; uniform vec2 uWind; uniform sampler2D uHt;
       varying vec3 vW;
       ${NOISE}${FOG}
       float wave(vec2 p){ return noise(p*1.5+uWind*uTime*.55)+.5*noise(p*3.7-uWind.yx*uTime*.4+9.)+.25*noise(p*8.+uWind*uTime*.9); }
@@ -141,7 +179,9 @@ export function createScene(canvas, labelRoot) {
         float spec=pow(max(dot(reflect(-uRealSun,n),V),0.),70.)*uSunVis;
         c+=vec3(1.,.93,.8)*spec*(.5+.9*lod);
         c+=uSunCol*pow(max(dot(reflect(-uSun,n),V),0.),14.)*.10;
-        gl_FragColor=vec4(applyFog(c,vW), mix(.50,.93,fres));
+        float al=mix(.50,.93,fres)*(1.-.9*uTopoMix);
+        if(uHasHt>.5){ vec4 th=texture2D(uHt,vW.xz/(2.*uHalf)+.5); al*=1.-smoothstep(.2,.7,(th.r*65280.+th.g*255.)/50.); }
+        gl_FragColor=vec4(applyFog(c,vW), al);
       }`
   }));
   water.renderOrder = 1; scene.add(water);
@@ -288,6 +328,44 @@ export function createScene(canvas, labelRoot) {
     for (const pts of list || []) if (pts.length > 1) walked.push(makeLine(pts, '#ffffff', 2, { depthTest: false, order: 4, opacity: 0.95 }));
   }
 
+  // ---- map layers: height image, contours, Topo50 skin
+  const loader = new THREE.TextureLoader();
+  let topoWanted = false, topoState = 'none', topoTarget = 0;
+  function loadHeights() {
+    loader.load('heights.png', t => {
+      t.flipY = false; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping; t.needsUpdate = true;
+      U.uHtPx.value.set(1 / t.image.width, 1 / t.image.height); U.uHt.value = t; U.uHasHt.value = 1;
+    }, undefined, () => { /* the map then uses the mesh heights */ });
+  }
+  function setLayers(o, cb) {
+    U.uContour.value = o.contours ? 1 : 0;
+    topoWanted = !!o.topo;
+    if (!topoWanted) { topoTarget = 0; return; }
+    if (topoState === 'ready') { topoTarget = 1; return; }
+    if (topoState === 'loading') return;
+    topoState = 'loading'; if (cb) cb('loading');
+    loader.load('topo.webp', t => {
+      t.flipY = false; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+      t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping; t.needsUpdate = true;
+      U.uTopo.value = t; topoState = 'ready'; if (topoWanted) topoTarget = 1; if (cb) cb('ready');
+    }, undefined, () => { topoState = 'none'; if (cb) cb('error'); });
+  }
+  // ---- topo feature lines: streams, roads, other tracks
+  let featLines = [];
+  function setFeatureLines(sets) {
+    for (const l of featLines) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); }
+    featLines = [];
+    for (const st of sets || []) {
+      if (!st.seg.length) continue;
+      const geo = new LineSegmentsGeometry(); geo.setPositions(st.seg);
+      const m = new LineMaterial({ color: new THREE.Color(st.color).getHex(), linewidth: st.width, transparent: true, opacity: st.opacity ?? 0.9, depthWrite: false, dashed: !!st.dashed, dashSize: 0.5, gapSize: 0.35 });
+      m.resolution.set(viewW, viewH);
+      const l = new LineSegments2(geo, m); if (st.dashed) l.computeLineDistances();
+      l.renderOrder = 2; l.frustumCulled = false; scene.add(l); featLines.push(l);
+    }
+  }
+  function showFeatureLines(v) { for (const l of featLines) l.visible = v; }
   let peerTrails = [];
   function setPeerTrails(list) {
     disposeLines(peerTrails); peerTrails = [];
@@ -383,7 +461,7 @@ export function createScene(canvas, labelRoot) {
     camera.aspect = w / h;
     camera.setViewOffset(w, h, 0, (sheet - top) / 2, w, h);
     camera.updateProjectionMatrix();
-    for (const l of lines.concat(walked, peerTrails)) l.material.resolution.set(w, h);
+    for (const l of lines.concat(walked, peerTrails, featLines)) l.material.resolution.set(w, h);
   }
 
   let chaseState = null;
@@ -402,6 +480,7 @@ export function createScene(canvas, labelRoot) {
 
   function tick(now, dt) {
     U.uTime.value = now / 1000;
+    if (U.uTopoMix.value !== topoTarget) { const d = topoTarget - U.uTopoMix.value; U.uTopoMix.value = Math.abs(d) < 0.02 ? topoTarget : U.uTopoMix.value + d * Math.min(1, dt * 5); }
     if (fly) {
       fly.t += dt * 1000;
       const u = Math.min(1, fly.t / fly.dur), e = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
@@ -447,7 +526,7 @@ export function createScene(canvas, labelRoot) {
   setSpherical(new THREE.Vector3(0, 0, 0), 520, 0.5, 0.75);
   return {
     camera, controls, tick, setEnv, setSize, flyTo, frame, setRoutes, setWalked, setPeerTrails, setWalker, setGhost, addMarker, clearMarkers,
-    addLodgeLight, clearLodgeLights, chase, getSpherical,
+    addLodgeLight, clearLodgeLights, chase, getSpherical, setLayers, loadHeights, setFeatureLines, showFeatureLines,
     resetNorth() { const s = getSpherical(); flyTo({ x: controls.target.x, z: controls.target.z, az: 0, dur: 700, dist: s.r, polar: s.phi }); },
     azimuth() { return getSpherical().theta; },
     idle(v) { idleOrbit = v; },
