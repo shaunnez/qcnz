@@ -60,6 +60,7 @@ export function envFrom(ts, w) {
 }
 
 export function createScene(canvas, labelRoot) {
+  const PACK = globalThis.__PACK__, BASE = PACK.base || '';
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   const scene = new THREE.Scene();
@@ -70,7 +71,8 @@ export function createScene(canvas, labelRoot) {
     uFog: { value: col('#bedbea') }, uFogD: { value: 0.0012 }, uHalf: { value: half }, uSky: { value: col('#3a84cc') },
     uCloud: { value: 0.2 }, uTime: { value: 0 }, uWind: { value: new THREE.Vector2(1, 0) }, uWindS: { value: 0.3 },
     uWet: { value: 0 }, uNight: { value: 0 }, uRealSun: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 1 },
-    uHt: { value: null }, uHasHt: { value: 0 }, uHtPx: { value: new THREE.Vector2(1 / 2048, 1 / 1608) }, uTopo: { value: null }, uTopoMix: { value: 0 }, uContour: { value: 0 }, uVex: { value: G.VEX / 100 }
+    uHt: { value: null }, uHasHt: { value: 0 }, uHtPx: { value: new THREE.Vector2(1 / 2048, 1 / 1608) }, uTopo: { value: null }, uTopoMix: { value: 0 }, uContour: { value: 0 }, uVex: { value: G.VEX / G.UNIT },
+    uHtDiv: { value: PACK.geo.htDiv || 50 }, uCov: { value: null }, uHasCov: { value: 0 }, uBush: { value: PACK.meta.bush || 800 }, uCi: { value: PACK.geo.hmax > 1250 ? 50 : 20 }
   };
 
   // ---- terrain
@@ -95,11 +97,11 @@ export function createScene(canvas, labelRoot) {
     vertexShader: `attribute float aH; varying vec3 vW; varying vec3 vN; varying float vH;
       void main(){ vH=aH; vN=normal; vW=position; gl_Position=projectionMatrix*viewMatrix*vec4(position,1.); }`,
     fragmentShader: `precision highp float;
-      uniform vec3 uSun, uSunCol, uAmb; uniform float uCloud, uTime, uWet, uNight, uHasHt, uTopoMix, uContour, uVex; uniform vec2 uWind, uHtPx;
-      uniform sampler2D uHt, uTopo;
+      uniform vec3 uSun, uSunCol, uAmb, uSky; uniform float uCloud, uTime, uWet, uNight, uHasHt, uTopoMix, uContour, uVex, uHtDiv, uHasCov, uBush, uCi; uniform vec2 uWind, uHtPx;
+      uniform sampler2D uHt, uTopo, uCov;
       varying vec3 vW; varying vec3 vN; varying float vH;
       ${NOISE}${FOG}
-      float hAt(vec2 uv){ vec4 t=texture2D(uHt,uv); return (t.r*65280.+t.g*255.)/50.; }
+      float hAt(vec2 uv){ vec4 t=texture2D(uHt,uv); return (t.r*65280.+t.g*255.)/uHtDiv; }
       float cline(float h, float st, float lim){ float f=h/st, w=fwidth(f); float d=abs(fract(f-.5)-.5)/max(w,1e-5); return (1.-smoothstep(.7,1.7,d))*(1.-smoothstep(lim*.5,lim,w)); }
       void main(){
         vec3 n=normalize(vN); vec3 c; float h=vH;
@@ -114,6 +116,10 @@ export function createScene(canvas, labelRoot) {
           float far=smoothstep(60.,420.,length(vW-cameraPosition));
           n=normalize(mix(nd,n,far*.55));
         }
+        // lakes, rock and ice from the cover image of the map pack
+        vec3 cv=uHasCov>.5 ? texture2D(uCov,uv).rgb : vec3(0.);
+        float lake=wet ? 0. : smoothstep(.4,.6,cv.r);
+        if(lake>.5) n=vec3(0.,1.,0.);
         float slope=1.-n.y;
         float t=fbm(vW.xz*.42), t2=noise(vW.xz*2.6);
         if(wet){
@@ -130,11 +136,17 @@ export function createScene(canvas, labelRoot) {
             vec3 scrub=mix(vec3(.24,.38,.20), vec3(.40,.50,.27), t2);
             bush=mix(mix(open,scrub,smoothstep(.06,.42,cov)), bush, smoothstep(.56,.94,cov));
           }
-          c=mix(bush, vec3(.44,.47,.27), smoothstep(620.,980.,h+t*180.));
+          c=mix(bush, vec3(.44,.47,.27), smoothstep(uBush-180.,uBush+180.,h+t*180.));
+          if(uHasCov>.5){
+            c=mix(c, vec3(.49,.47,.43), smoothstep(uBush+380.,uBush+820.,h+t*170.)*.8);
+            c=mix(c, mix(vec3(.45,.43,.40), vec3(.57,.54,.50), t2), cv.g*.9);
+            c=mix(c, vec3(.93,.95,.98), cv.b);
+          }
           c=mix(c, vec3(.46,.43,.37), smoothstep(.5,.78,slope+t*.12));
           c=mix(vec3(.88,.81,.62), c, smoothstep(1.2,7.,h+t*4.));
+          c=mix(c, mix(vec3(.09,.31,.40), vec3(.05,.22,.32), t), lake);
           if(uContour>.5){
-            float cl=max(cline(h,20.,.3)*.34, cline(h,100.,.5)*.62)*step(2.,h);
+            float cl=max(cline(h,uCi,.3)*(uCi>30.?.24:.34), cline(h,uCi*5.,.5)*.62)*step(2.,h)*(1.-lake);
             c=mix(c, vec3(.96,.90,.70), cl);
           }
         }
@@ -144,6 +156,7 @@ export function createScene(canvas, labelRoot) {
         float rim=pow(max(dot(n,uSun)*.5+.5,0.),2.)*.25;
         vec3 light=uAmb*(1.55+rim)+uSunCol*dif*1.05;
         vec3 lit=c*light;
+        if(lake>0.){ vec3 V=normalize(cameraPosition-vW); lit=mix(lit, mix(lit, uSky*1.02, .14+.6*pow(1.-max(V.y,0.),3.)), lake); }
         lit*=1.-uWet*.16;
         if(uTopoMix>0.){
           // the printed map: keep it readable, with soft relief shade
@@ -164,7 +177,7 @@ export function createScene(canvas, labelRoot) {
     uniforms: U, transparent: true, depthWrite: false,
     vertexShader: `varying vec3 vW; void main(){ vW=position; gl_Position=projectionMatrix*viewMatrix*vec4(position,1.); }`,
     fragmentShader: `precision highp float;
-      uniform vec3 uSun, uSunCol, uAmb, uSky, uRealSun; uniform float uTime, uWindS, uCloud, uSunVis, uTopoMix, uHasHt; uniform vec2 uWind; uniform sampler2D uHt;
+      uniform vec3 uSun, uSunCol, uAmb, uSky, uRealSun; uniform float uTime, uWindS, uCloud, uSunVis, uTopoMix, uHasHt, uHtDiv; uniform vec2 uWind; uniform sampler2D uHt;
       varying vec3 vW;
       ${NOISE}${FOG}
       float wave(vec2 p){ return noise(p*1.5+uWind*uTime*.55)+.5*noise(p*3.7-uWind.yx*uTime*.4+9.)+.25*noise(p*8.+uWind*uTime*.9); }
@@ -180,7 +193,7 @@ export function createScene(canvas, labelRoot) {
         c+=vec3(1.,.93,.8)*spec*(.5+.9*lod);
         c+=uSunCol*pow(max(dot(reflect(-uSun,n),V),0.),14.)*.10;
         float al=mix(.50,.93,fres)*(1.-.9*uTopoMix);
-        if(uHasHt>.5){ vec4 th=texture2D(uHt,vW.xz/(2.*uHalf)+.5); al*=1.-smoothstep(.2,.7,(th.r*65280.+th.g*255.)/50.); }
+        if(uHasHt>.5){ vec4 th=texture2D(uHt,vW.xz/(2.*uHalf)+.5); al*=1.-smoothstep(.2,.7,(th.r*65280.+th.g*255.)/uHtDiv); }
         gl_FragColor=vec4(applyFog(c,vW), al);
       }`
   }));
@@ -398,6 +411,7 @@ export function createScene(canvas, labelRoot) {
     for (const p of pts) { minx = Math.min(minx, p.x); maxx = Math.max(maxx, p.x); minz = Math.min(minz, p.z); maxz = Math.max(maxz, p.z); }
     const a = pts[0], b = pts[pts.length - 1];
     let hx = b.x - a.x, hz = b.z - a.z; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
+    if (hl < 0.3 * Math.hypot(maxx - minx, maxz - minz)) { hx = 0; hz = -1; } // a loop: north is up
     let along = 0, across = 0; const cx = (minx + maxx) / 2, cz = (minz + maxz) / 2;
     for (const p of pts) { const dx = p.x - cx, dz = p.z - cz; along = Math.max(along, Math.abs(dx * hx + dz * hz)); across = Math.max(across, Math.abs(-dx * hz + dz * hx)); }
     const tv = Math.tan(camera.fov * Math.PI / 360), polar = o.polar ?? 0.82;
@@ -435,7 +449,11 @@ export function createScene(canvas, labelRoot) {
   const loader = new THREE.TextureLoader();
   let topoWanted = false, topoState = 'none', topoTarget = 0;
   function loadHeights() {
-    loader.load('heights.png', t => {
+    if (PACK.meta.cover) loader.load(BASE + 'cover.png', t => {
+      t.flipY = false; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping; t.needsUpdate = true; U.uCov.value = t; U.uHasCov.value = 1;
+    }, undefined, () => { /* no lakes on the painted map */ });
+    loader.load(BASE + (PACK.meta.ht || 'heights.png'), t => {
       t.flipY = false; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
       t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping; t.needsUpdate = true;
       U.uHtPx.value.set(1 / t.image.width, 1 / t.image.height); U.uHt.value = t; U.uHasHt.value = 1;
@@ -448,7 +466,7 @@ export function createScene(canvas, labelRoot) {
     if (topoState === 'ready') { topoTarget = 1; return; }
     if (topoState === 'loading') return;
     topoState = 'loading'; if (cb) cb('loading');
-    loader.load('topo.webp', t => {
+    loader.load(BASE + 'topo.webp', t => {
       t.flipY = false; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
       t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping; t.needsUpdate = true;
       U.uTopo.value = t; topoState = 'ready'; if (topoWanted) topoTarget = 1; if (cb) cb('ready');

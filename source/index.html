@@ -59,6 +59,17 @@ h1,h2,h3{text-wrap:balance}
 .hud{position:fixed;left:0;right:0;top:0;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:calc(10px + var(--sat)) 14px 26px;pointer-events:none;background:linear-gradient(rgba(4,16,20,.72),rgba(4,16,20,0))}
 .hud>*{pointer-events:auto}
 .eyebrow{font:italic 400 14px/1 var(--f-chart);letter-spacing:.06em;color:var(--sea)}
+button.eyebrow{display:inline-flex;align-items:center;gap:5px;padding:7px 10px 7px 0;margin:-7px 0;text-shadow:0 1px 8px rgba(0,0,0,.6);max-width:100%}
+button.eyebrow span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.mk.off{display:none!important}
+button.eyebrow svg{width:11px;height:11px;flex:none}
+#cardText{max-height:calc(100vh - var(--sheet-h,300px) - 210px);min-height:60px;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.walks{display:flex;flex-direction:column;gap:6px;margin:4px 0 8px}
+.walkrow{display:block;width:100%;text-align:left;padding:9px 11px;border-radius:12px;background:var(--glass-2);border:1px solid transparent;line-height:1.2}
+.walkrow b{display:block;font-size:14.5px;color:var(--text)}
+.walkrow small{font-size:12px;color:var(--mute)}
+.walkrow.cur{border-color:var(--amber)}
+.plan input[type=date]{background:rgba(255,255,255,.09);border:1px solid var(--edge);border-radius:10px;padding:7px 10px;font-size:14px;color:var(--text);color-scheme:dark;max-width:62%}
 #dayTitle{font-size:20px;white-space:nowrap;line-height:1.1;font-weight:700;letter-spacing:-.01em;margin-top:4px;text-shadow:0 1px 10px rgba(0,0,0,.5)}
 .sub{color:var(--mute);font-size:13px;margin-top:3px;text-shadow:0 1px 6px rgba(0,0,0,.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hud>div:first-child{min-width:0}
@@ -66,7 +77,7 @@ h1,h2,h3{text-wrap:balance}
 .chip{display:flex;align-items:center;gap:8px;padding:7px 12px 7px 9px;border-radius:14px;background:var(--glass);border:1px solid var(--edge);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 .chip svg{width:26px;height:26px;color:var(--amber)}
 .chip b{font-size:19px;font-weight:700;line-height:1}
-.chip small{display:block;font-size:11px;color:var(--mute);line-height:1.15;text-align:left}
+.chip small{display:block;font-size:11px;color:var(--mute);line-height:1.15;text-align:left;max-width:104px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #compass{width:40px;height:40px;border-radius:50%;background:var(--glass);border:1px solid var(--edge);display:grid;place-items:center;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 #compass svg{width:24px;height:24px}
 #locBtn,#layBtn{width:40px;height:40px;border-radius:50%;background:var(--glass);border:1px solid var(--edge);display:grid;place-items:center;color:var(--text);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
@@ -253,7 +264,7 @@ input[type=range].plain::-moz-range-thumb{width:18px;height:18px;border-radius:5
 
 <header class="hud">
   <div>
-    <p class="eyebrow">Queen Charlotte Track</p>
+    <button class="eyebrow" id="walkBtn" aria-label="Select a walk"><span>Queen Charlotte Track</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
     <h1 id="dayTitle">Day 1</h1>
     <p class="sub" id="daySub"></p>
   </div>

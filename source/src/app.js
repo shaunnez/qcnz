@@ -1,14 +1,15 @@
 import * as G from './geo.js';
-import { STOPS, NIGHT_OPTIONS, DEFAULT_NIGHTS, POIS, LABELS, WILDLIFE, GUIDE, HELP } from './content.js';
+import { STOPS, NIGHT_OPTIONS, DEFAULT_NIGHTS, POIS, LABELS, WILDLIFE, GUIDE, HELP, WALK, START, END, REV, ZONES } from './content.js';
 import * as W from './weather.js';
 import { createScene, envFrom } from './scene.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const DAY0 = Date.parse('2026-11-13T00:00:00+13:00');
+const PACK = globalThis.__PACK__, BASE = PACK.base || '', QCT = WALK.id === 'qct', PADDLE = WALK.mode === 'paddle';
+let DAY0 = 0; // the start of day 1, New Zealand time
 const DAYCOLS = ['#ffb454', '#ff7d5c', '#f472b6', '#b79cff', '#6fe0ff'];
-const DEFAULT_STARTS = ['10:30', '09:00', '08:00', '08:30', '08:30'];
-const KEY = 'qct-2026-v3', OLD_KEY = 'qct-2026-v2';
+const DEFAULT_STARTS = QCT ? ['10:30', '09:00', '08:00', '08:30', '08:30'] : ['09:00', '08:30', '08:30', '08:30', '08:30', '08:30', '08:30'];
+const KEY = PACK.key, OLD_KEY = QCT ? 'qct-2026-v2' : '';
 const KIND = {
   view: { label: 'Lookout', color: '#ffd27a', path: '<path d="M8 2 15 14H1z"/>' },
   history: { label: 'History', color: '#f9a8c8', path: '<path d="M8 1l7 7-7 7-7-7z"/>' },
@@ -18,6 +19,7 @@ const KIND = {
 };
 // Facility badges, with the colours of the printed route guide.
 const FAC = {
+  hut: { c: '#3d4a8f', label: 'Hut', p: '<path d="M3.5 8 8 4l4.5 4v4.5h-9z" fill="#fff" stroke="none"/><path d="M7 12.5v-3h2v3" stroke="#3d4a8f"/>' },
   lodge: { c: '#3d4a8f', label: 'Lodge', p: '<path d="M3.5 8 8 4l4.5 4v4.5h-9z" fill="#fff" stroke="none"/>' },
   shelter: { c: '#4b4266', label: 'Shelter', p: '<path d="M3 8.2 8 4.5l5 3.7M5 8.5v4M11 8.5v4"/>' },
   water: { c: '#2f7fd1', label: 'Drinking water', p: '<path d="M8 3.5c2 2.4 3 3.9 3 5.4a3 3 0 0 1-6 0c0-1.5 1-3 3-5.4z" fill="#fff" stroke="none"/>' },
@@ -36,21 +38,29 @@ const kmTxt = m => (m / 1000).toFixed(1);
 const durTxt = h => { const m = Math.round(h * 60); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + W.p2(m % 60); };
 
 // ---------- saved data (this device only)
-const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {}, layers: { topo: false, contours: true, feat: true }, photoBy: '', share: null, peers: {}, shareName: '', devId: '' }, (() => {
+const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {}, layers: { topo: false, contours: true, feat: true }, photoBy: '', share: null, peers: {}, shareName: '', devId: '', plan: {}, date: '' }, (() => {
   try {
     const cur = localStorage.getItem(KEY);
     if (cur) return JSON.parse(cur);
+    if (!OLD_KEY) { // a walk that is new on this device: take the name and the map layers from the Queen Charlotte data
+      const q = JSON.parse(localStorage.getItem('qct-2026-v3') || '{}');
+      return { shareName: q.shareName || '', photoBy: q.photoBy || '', layers: q.layers || undefined, devId: q.devId || '' };
+    }
     const old = JSON.parse(localStorage.getItem(OLD_KEY) || '{}'); // keep check-ins from the first version, take the new start times
     delete old.starts; return old;
   } catch (e) { return {}; }
 })());
 let saveTimer = 0;
+function saveNow() { clearTimeout(saveTimer); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage is not available */ } }
 function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage is not available */ } }, 300);
 }
 if (!S.devId) S.devId = Math.random().toString(36).slice(2, 10);
-if (S.wx && S.wx.zones && Date.parse(S.wx.fetched) > Date.parse(W.WX.fetched)) W.setWX(S.wx);
+if (!S.layers) S.layers = { topo: false, contours: true, feat: true };
+if (!S.plan || typeof S.plan !== 'object') S.plan = {};
+if (!/^\d{4}-\d\d-\d\d$/.test(S.date || '')) S.date = QCT ? '2026-11-13' : W.isoDate(Date.now() + W.DAYMS);
+DAY0 = W.dayStart(S.date);
 
 // ---------- places
 for (const p of POIS) {
@@ -58,6 +68,9 @@ for (const p of POIS) {
   else { const s = G.nearestOnTrack(p.lat, p.lon); p.km = s.km; p.off = s.off; }
   Object.assign(p, G.world(p, 0.6));
 }
+// Distance of each stop along the track, in the walk direction. A lodge with a side track uses its junction.
+for (const id in STOPS) { const s = STOPS[id]; s.id = id; if (s.km !== undefined) s.km = G.planKm(s.km); else if (!s.arrive && !s.leave) s.km = G.nearestOnTrack(s.lat, s.lon).km; }
+const stopKm = (s, role) => { const side = G.SIDES[role === 'leave' ? (s.leave || s.arrive) : (s.arrive || s.leave)]; return side ? side.km : s.km; };
 function pt(lat, lon, ele, side) {
   const x = G.toX(lon), z = G.toZ(lat);
   return { lat, lon, ele, side, x, z, y: G.groundY(x, z) + 0.3 };
@@ -65,35 +78,45 @@ function pt(lat, lon, ele, side) {
 
 // ---------- the plan
 let days = [];
+// The first and last place of the plan. The default is the full track.
+const planFrom = () => (S.plan.from && STOPS[S.plan.from] ? S.plan.from : START), planTo = () => (S.plan.to && STOPS[S.plan.to] ? S.plan.to : END);
+const planSeq = () => [planFrom(), ...S.nights, planTo()];
+function fixPlan() { // keep only the nights that are between the first and the last place, in track order
+  if (stopKm(STOPS[planTo()], 'arrive') - stopKm(STOPS[planFrom()], 'leave') < 1) { S.plan.from = null; S.plan.to = null; }
+  const a = stopKm(STOPS[planFrom()], 'leave'), b = stopKm(STOPS[planTo()], 'arrive'); let prev = a;
+  S.nights = S.nights.filter(id => { const s = STOPS[id]; if (!s) return false; const k = stopKm(s, 'arrive'); if (k > prev + 0.5 && k < b - 0.5) { prev = stopKm(s, 'leave'); return true; } return false; });
+}
+const zoneOfKm = km => { const f = REV ? G.TOTAL_KM - km : km, z = PACK.zoneKm || [G.TOTAL_KM / 3, G.TOTAL_KM * 2 / 3]; return f < z[0] ? 0 : f < z[1] ? 1 : 2; };
 function buildDays() {
-  const seq = ['shipcove', ...S.nights, 'anakiwa'];
+  const seq = planSeq();
   days = [];
   for (let i = 0; i < seq.length - 1; i++) {
     const from = STOPS[seq[i]], to = STOPS[seq[i + 1]];
     const sOut = from.leave ? G.SIDES[from.leave] : null, sIn = to.arrive ? G.SIDES[to.arrive] : null;
-    const fromKm = sOut ? sOut.km : 0, toKm = Math.min(sIn ? sIn.km : G.TOTAL_KM, G.TOTAL_KM);
+    const fromKm = sOut ? sOut.km : (from.km ?? 0), toKm = Math.min(sIn ? sIn.km : (to.km ?? G.TOTAL_KM), G.TOTAL_KM);
     const pts = [];
     if (sOut) for (let k = sOut.pts.length - 1; k > 0; k--) { const p = sOut.pts[k]; pts.push(pt(p.lat, p.lon, p.ele, 1)); }
     const mainFrom = pts.length;
     for (let k = G.kmIndex(fromKm); k <= G.kmIndex(toKm); k++) { const p = G.TRACK[k]; const o = pt(p.lat, p.lon, p.ele, 0); o.km = p.km; pts.push(o); }
     const mainTo = pts.length;
     if (sIn) for (let k = 1; k < sIn.pts.length; k++) { const p = sIn.pts[k]; pts.push(pt(p.lat, p.lon, p.ele, 2)); }
-    let d = 0, up = 0, ref = pts[0].ele;
+    let d = 0, up = 0, down = 0, ref = pts[0].ele;
     pts[0].d = 0;
     for (let k = 1; k < pts.length; k++) {
       d += pts[k].km !== undefined && pts[k - 1].km !== undefined ? (pts[k].km - pts[k - 1].km) * 1000 : G.distM(pts[k - 1].lat, pts[k - 1].lon, pts[k].lat, pts[k].lon); pts[k].d = d;
-      if (pts[k].ele - ref > 5) { up += pts[k].ele - ref; ref = pts[k].ele; } else if (ref - pts[k].ele > 5) ref = pts[k].ele;
+      if (pts[k].ele - ref > 5) { up += pts[k].ele - ref; ref = pts[k].ele; } else if (ref - pts[k].ele > 5) { down += ref - pts[k].ele; ref = pts[k].ele; }
     }
-    const guide = GUIDE[seq[i] + '>' + seq[i + 1]] || null;
-    const hours = guide ? guide.h[1] : (d / 4000 + up / 600) * 1.2, date = DAY0 + i * W.DAYMS;
+    const gRev = !GUIDE[seq[i] + '>' + seq[i + 1]] && GUIDE[seq[i + 1] + '>' + seq[i]], guide = GUIDE[seq[i] + '>' + seq[i + 1]] || gRev || null;
+    const est = PADDLE ? d / 5500 : QCT ? (d / 4000 + up / 600) * 1.2 : (d / 4000 + up / 600 + down / 1500) * 1.18;
+    const hours = guide ? guide.h[1] : est, date = DAY0 + i * W.DAYMS;
     const [sh, sm] = (S.starts[i] || '08:30').split(':').map(Number);
     const tStart = date + (sh * 60 + sm) * 60e3, tEnd = tStart + hours * W.HOUR;
-    const [bh, bm] = (S.boat || '16:00').split(':').map(Number), boat = seq[i + 1] === 'anakiwa' ? date + (bh * 60 + bm) * 60e3 : null;
+    const [bh, bm] = (S.boat || '16:00').split(':').map(Number), boat = WALK.boat && !REV && seq[i + 1] === END ? date + (bh * 60 + bm) * 60e3 : null;
     const mid = (fromKm + toKm) / 2, outLen = pts[mainFrom].d;
     const pois = POIS.filter(p => !p.far && p.km >= fromKm - 0.05 && p.km <= toKm + 0.05)
       .map(p => ({ p, d: outLen + (p.km - fromKm) * 1000 })).sort((a, b) => a.d - b.d);
-    days.push({ i, from, to, fromId: seq[i], toId: seq[i + 1], fromKm, toKm, pts, mainFrom, mainTo, dist: d, up, hours, date, tStart, tEnd, guide, boat,
-      zone: mid < 30 ? 0 : mid < 52 ? 1 : 2, pois, color: DAYCOLS[i % 5] });
+    days.push({ i, from, to, fromId: seq[i], toId: seq[i + 1], fromKm, toKm, pts, mainFrom, mainTo, dist: d, up, down, hours, date, tStart, tEnd, guide, gRev: !!gRev, boat,
+      zone: zoneOfKm(mid), pois, color: DAYCOLS[i % 5] });
   }
   let off = 0;
   for (const d of days) { d.off = off; off += d.dist; }
@@ -117,8 +140,17 @@ function nearestOnDay(day, lat, lon) {
 const todayIndex = () => { const i = Math.floor((Date.now() - DAY0) / W.DAYMS); return i >= 0 && i < days.length ? i : null; };
 const dayOfTime = t => { const i = Math.floor((t - DAY0) / W.DAYMS); return i >= 0 && i < days.length ? i : null; };
 
+// The forecast frame: from one day before day 1 to one day after the last day.
+function wxFrame() {
+  const t0 = DAY0 - W.DAYMS, n = (days.length + 2) * 24;
+  const ok = w => w && w.zones && w.zones.length && W.parseLocal(w.t0) === t0;
+  if (ok(PACK.wx)) W.setWX(ok(S.wx) && Date.parse(S.wx.fetched) > Date.parse(PACK.wx.fetched) ? S.wx : PACK.wx);
+  else if (ok(S.wx) && S.wx.n === n) W.setWX(S.wx);
+  else W.setWX(W.blankWX(t0, n));
+}
+
 // ---------- state
-buildDays();
+fixPlan(); buildDays(); wxFrame();
 let sel = todayIndex() ?? 0;
 let mode = 'live', simT = Date.now(), curWx = null, me = null, lastEnvT = 0, lastUiT = 0, lastZone = -1;
 const R = { src: 'plan', day: 'all', playing: false, speed: 1, p: 0, segs: [], lastD: 0, lastSeg: -1 };
@@ -134,10 +166,13 @@ function drawRoutes() {
     segs.push({ pts: p.slice(day.mainFrom, day.mainTo), color: day.color, dim });
     if (day.mainTo < p.length) segs.push({ pts: p.slice(day.mainTo - 1), color: day.color, dim, side: true });
   }
-  for (const k of ['eatwell', 'onahau']) {
+  for (const k of (PACK.extraSides || [])) {
     const s = G.SIDES[k];
-    segs.push({ pts: s.pts.map(q => pt(q.lat, q.lon, q.ele)), color: '#ffffff', dim: true, side: true });
+    if (s) segs.push({ pts: s.pts.map(q => pt(q.lat, q.lon, q.ele)), color: '#ffffff', dim: true, side: true });
   }
+  // the parts of the track that are not in the plan
+  const a = G.kmIndex(days[0].fromKm), b = G.kmIndex(days[days.length - 1].toKm);
+  for (const [i0, i1] of [[0, a], [b, G.TN - 1]]) if (i1 - i0 > 3) segs.push({ pts: G.TRACK.slice(i0, i1 + 1).map(q => pt(q.lat, q.lon, q.ele)), color: '#ffffff', dim: true, side: true });
   scene.setRoutes(segs);
   drawWalked();
 }
@@ -153,13 +188,14 @@ function drawWalked() {
 function mkEl(cls, html) { const el = document.createElement('div'); el.className = 'mk ' + cls; el.innerHTML = html; return el; }
 function buildStopMarkers() {
   scene.clearMarkers('stops'); scene.clearLodgeLights();
-  const seq = ['shipcove', ...S.nights, 'anakiwa'];
+  const seq = planSeq();
+  for (const p of POIS) if (p.stop && p.el) p.el.classList.toggle('off', seq.includes(p.stop)); // the stop marker shows this place
   seq.forEach((id, n) => {
     const s = STOPS[id], w = G.world(s, 1.2);
     const el = mkEl('stop', `<button><i></i>${esc(s.short)}</button>`);
     el.firstChild.addEventListener('click', () => showCard({
-      kindHtml: n === 0 ? 'Start' : n === seq.length - 1 ? 'Finish' : 'Night ' + n, title: s.name, text: s.note, x: w.x, z: w.z,
-      meta: n > 0 && n < seq.length - 1 ? 'Day ' + n + ' ends here. ' + kmTxt(days[n - 1].dist) + ' km walk.' : ''
+      kindHtml: n === 0 ? 'Start' : n === seq.length - 1 ? 'Finish' : 'Night ' + n, title: s.name, text: s.note || '', x: w.x, z: w.z,
+      meta: n > 0 && n < seq.length - 1 ? 'Day ' + n + ' ends here. ' + kmTxt(days[n - 1].dist) + ' km' + (PADDLE ? '.' : ' walk.') : ''
     }));
     scene.addMarker({ el, ...w, pri: 100 - n, group: 'stops', w: s.short.length * 7 + 34, h: 28, force: true, noOcc: true });
     scene.addLodgeLight(w);
@@ -217,7 +253,7 @@ function hideCard() { $('card').hidden = true; if (selPoi) { selPoi.el.classList
 function showPoi(p) {
   if (selPoi) selPoi.el.classList.remove('sel');
   selPoi = p; p.el.classList.add('sel');
-  let meta = 'km ' + p.km.toFixed(1) + ' from Ship Cove';
+  let meta = 'km ' + p.km.toFixed(1) + ' from ' + STOPS[START].short;
   if (p.side) meta += ' · side track ' + Math.round(p.off / 10) * 10 + ' m';
   else if (p.off > 250) meta += ' · ' + (p.off > 1500 ? (p.off / 1000).toFixed(1) + ' km' : Math.round(p.off / 50) * 50 + ' m') + ' from the track';
   const day = days[trackDay()];
@@ -244,7 +280,7 @@ function updateTimeUI(force) {
   const w = curWx; if (!w) return;
   $('timeLabel').textContent = W.fmtDay(simT) + ' · ' + W.fmtTime(simT);
   $('timeWx').textContent = w.inRange ? `${W.describe(w.code)} · ${Math.round(w.wind)} km/h ${W.compass(w.dir)}, gusts ${Math.round(w.gust)}` : 'No forecast for this time';
-  $('wxChip').innerHTML = W.icon(w.code, isDay(simT)) + `<span><b class="num">${w.inRange ? Math.round(w.temp) + '°' : '–'}</b></span><small>${w.rain >= 0.1 ? w.rain.toFixed(1) + ' mm/h' : Math.round(w.prob) + '% rain'}<br>${['Outer sound', 'Ridge', 'Inner sound'][zoneAt(simT)]}</small>`;
+  $('wxChip').innerHTML = W.icon(w.code, isDay(simT)) + `<span><b class="num">${w.inRange ? Math.round(w.temp) + '°' : '–'}</b></span><small>${w.rain >= 0.1 ? w.rain.toFixed(1) + ' mm/h' : Math.round(w.prob) + '% rain'}<br>${esc((ZONES[zoneAt(simT)] || {}).short || '')}</small>`;
   $('liveBtn').classList.toggle('on', mode === 'live');
   $('liveBtn').textContent = mode === 'live' ? 'Now' : 'Go to now';
   if (force || document.activeElement !== $('scrub')) $('scrub').value = Math.round((simT - W.T0) / 600e3);
@@ -279,16 +315,17 @@ function buildTimebar() {
 
 // ---------- Days panel
 let planOpen = false;
+const YMAX = [250, 500, 1000, 1500, 2000, 2500, 3000].find(v => v >= Math.max(...G.TRACK.map(p => p.ele))) || 3000; // top of the height profiles
 function profileSvg(day) {
-  const Wd = 340, Hh = 104, L = 28, Rr = 8, T = 8, Bm = 18, ymax = 500, pw = Wd - L - Rr, ph = Hh - T - Bm;
+  const Wd = 340, Hh = 104, L = 28, Rr = 8, T = 8, Bm = 18, ymax = YMAX, pw = Wd - L - Rr, ph = Hh - T - Bm;
   const X = d => L + d / day.dist * pw, Y = e => T + ph - Math.min(e, ymax) / ymax * ph;
   const step = Math.max(1, Math.floor(day.pts.length / 170));
   let line = '';
   for (let i = 0; i < day.pts.length; i += step) line += (i ? 'L' : 'M') + X(day.pts[i].d).toFixed(1) + ' ' + Y(day.pts[i].ele).toFixed(1);
   const last = day.pts[day.pts.length - 1]; line += 'L' + X(last.d).toFixed(1) + ' ' + Y(last.ele).toFixed(1);
   let g = '';
-  for (const v of [0, 250, 500]) g += `<line x1="${L}" x2="${Wd - Rr}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,.1)"/><text x="${L - 4}" y="${Y(v) + 3}" text-anchor="end">${v}</text>`;
-  for (let k = 0; k <= day.dist / 1000; k += 5) g += `<text x="${X(k * 1000)}" y="${Hh - 4}" text-anchor="middle">${k}${k === 0 ? ' km' : ''}</text>`;
+  for (const v of [0, YMAX / 2, YMAX]) g += `<line x1="${L}" x2="${Wd - Rr}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,.1)"/><text x="${L - 4}" y="${Y(v) + 3}" text-anchor="end">${v}</text>`;
+  for (let k = 0, ks = day.dist > 30000 ? 10 : 5; k <= day.dist / 1000; k += ks) g += `<text x="${X(k * 1000)}" y="${Hh - 4}" text-anchor="middle">${k}${k === 0 ? ' km' : ''}</text>`;
   let pm = '';
   for (const e of day.pois) if (e.p.kind !== 'rest') { const q = posOnDay(day, e.d); pm += `<circle cx="${X(e.d).toFixed(1)}" cy="${Y(q.ele).toFixed(1)}" r="3" fill="${KIND[e.p.kind].color}" stroke="#06181c"/>`; }
   const meX = me && me.day === day.i ? `<line x1="${X(me.d)}" x2="${X(me.d)}" y1="${T}" y2="${T + ph}" stroke="#fff" stroke-width="1.5"/><circle cx="${X(me.d)}" cy="${Y(posOnDay(day, me.d).ele)}" r="4" fill="#fff"/>` : '';
@@ -301,38 +338,48 @@ function profileSvg(day) {
 function renderDays() {
   const day = days[sel], s = W.summarize(day.tStart, day.tEnd, day.zone);
   const pills = days.map(d => `<button class="pill" aria-pressed="${d.i === sel}" data-day="${d.i}"><b><i style="background:${d.color}"></i>${W.fmtWd(d.date)} ${W.nz(d.date).d}</b><small>${kmTxt(d.dist)} km</small></button>`).join('');
-  const warn = s.gust >= 75 || s.rain >= 3;
+  const warn = !s.none && (s.gust >= 75 || s.rain >= 3);
   const pois = day.pois.map((e, n) => `<li><button data-poi="${n}"><span class="km num">${kmTxt(e.d)} km${day.guide && e.p.inH ? `<small>${e.p.inH}</small>` : ''}</span>${glyph(e.p.kind)}<span class="nm">${esc(e.p.name)}<span class="bd">${badges(e.p.fac)}</span></span>${me && me.day === day.i && e.d > me.d && e.d - me.d < 3000 ? `<span class="away num">${kmTxt(e.d - me.d)} km</span>` : ''}</button></li>`).join('');
+  const kmOf = id => stopKm(STOPS[id], 'arrive'), endKm = kmOf(planTo()), verb = PADDLE ? 'Paddle' : 'Walk';
   const opts = (n) => {
-    const prevKm = n === 0 ? 0 : G.SIDES[STOPS[S.nights[n - 1]].leave].km;
-    return NIGHT_OPTIONS.filter(id => G.SIDES[STOPS[id].arrive].km > prevKm + 2).map(id => `<option value="${id}" ${S.nights[n] === id ? 'selected' : ''}>${esc(STOPS[id].name)}</option>`).join('') + `<option value="" ${S.nights[n] ? '' : 'selected'}>Walk out to Anakiwa</option>`;
+    const prevKm = stopKm(STOPS[n === 0 ? planFrom() : S.nights[n - 1]], 'leave');
+    return NIGHT_OPTIONS.filter(id => kmOf(id) > prevKm + 2 && kmOf(id) < endKm - 0.5).map(id => `<option value="${id}" ${S.nights[n] === id ? 'selected' : ''}>${esc(STOPS[id].name)} · ${Math.round(kmOf(id) - prevKm)} km</option>`).join('') + `<option value="" ${S.nights[n] ? '' : 'selected'}>${verb} out to ${esc(STOPS[planTo()].short)}</option>`;
   };
   let plan = '';
   if (planOpen) {
-    plan = '<div class="plan"><h3 class="t">Where you sleep</h3>';
-    for (let n = 0; n < 4 && n <= S.nights.length; n++) plan += `<label for="night${n}">Night ${n + 1}<select id="night${n}" data-night="${n}">${opts(n)}</select></label>`;
-    plan += '<p class="fine">Distances, times and the forecast zone change with your plan. The dates are 13 to 17 November 2026.</p></div>';
+    const all = Object.keys(STOPS).filter(id => STOPS[id].km !== undefined || STOPS[id].arrive || STOPS[id].leave).sort((a, b) => kmOf(a) - kmOf(b));
+    const fromKm = stopKm(STOPS[planFrom()], 'leave');
+    const o = (list, cur) => list.map(id => `<option value="${id}" ${id === cur ? 'selected' : ''}>${esc(STOPS[id].name)} · km ${Math.round(kmOf(id))}</option>`).join('');
+    plan = `<div class="plan"><h3 class="t">Your ${PADDLE ? 'trip' : 'walk'}</h3>
+      <label for="planDir">Direction<select id="planDir"><option value="0" ${REV ? '' : 'selected'}>${esc(STOPS[REV ? END : START].short)} to ${esc(STOPS[REV ? START : END].short)}</option><option value="1" ${REV ? 'selected' : ''}>${esc(STOPS[REV ? START : END].short)} to ${esc(STOPS[REV ? END : START].short)}</option></select></label>
+      <label for="planFrom">Start at<select id="planFrom">${o(all.filter(id => kmOf(id) < endKm - 1), planFrom())}</select></label>
+      <label for="planTo">Stop at<select id="planTo">${o(all.filter(id => kmOf(id) > fromKm + 1), planTo())}</select></label>
+      <label for="planDate">Day 1<input type="date" id="planDate" value="${S.date}"></label>
+      <h3 class="t">Where you sleep</h3>`;
+    for (let n = 0; n < 8 && n <= S.nights.length; n++) { const op = opts(n); if (n === S.nights.length && !/value="[a-z]/.test(op)) break; plan += `<label for="night${n}">Night ${n + 1}<select id="night${n}" data-night="${n}">${op}</select></label>`; }
+    plan += '<p class="fine">Distances, times and the forecast change with your plan. A change of direction starts the map again.</p></div>';
   }
+  const notes = day.guide && !day.gRev ? day.guide.notes : (WALK.notes || []);
   $('p-days').innerHTML = `
     <div class="pills">${pills}</div>
     <h2 class="t">${esc(day.from.short)} to ${esc(day.to.name)}</h2>
     <div class="stats">
       <div><b class="num">${kmTxt(day.dist)}</b><span>km</span></div>
       <div><b class="num">${Math.round(day.up / 10) * 10}</b><span>m of climb</span></div>
-      <div><b class="num">${day.guide ? (day.guide.h[0] === day.guide.h[1] ? day.guide.h[0] + ' h' : day.guide.h[0] + '–' + day.guide.h[1] + ' h') : durTxt(day.hours)}</b><span>${day.guide ? 'route guide time' : 'walk time'}</span></div>
+      <div><b class="num">${day.guide ? (day.guide.h[0] === day.guide.h[1] ? day.guide.h[0] + ' h' : day.guide.h[0] + '–' + day.guide.h[1] + ' h') : durTxt(day.hours)}</b><span>${day.guide ? 'route guide time' : PADDLE ? 'paddle time, estimate' : 'walk time, estimate'}</span></div>
     </div>
     <label class="startrow" for="startTime"><span>Start</span><input type="time" id="startTime" value="${S.starts[day.i] || '08:30'}"><span class="num">Arrive about ${W.fmtTime(day.tEnd)}${day.guide && day.guide.km ? '. Route guide: ' + day.guide.km + ' km' : ''}</span></label>
-    ${day.boat ? `<label class="startrow boatrow ${day.tEnd > day.boat - 20 * 60e3 ? 'late' : ''}" for="boatTime"><span>Boat</span><input type="time" id="boatTime" value="${S.boat}"><span class="num">${day.tEnd > day.boat ? 'Your plan arrives after the boat. Start earlier.' : 'Water taxi from Anakiwa. Your plan has ' + durTxt((day.boat - day.tEnd) / W.HOUR) + ' spare.' + (day.boat - day.tEnd < 45 * 60e3 ? ' Start earlier if you can.' : '')}</span></label>` : ''}
-    <button class="verdict ${warn ? 'warn' : ''}" id="verdict" style="text-align:left">${W.icon(s.code, true)}<span><b class="num">${Math.round(s.tmin)}° to ${Math.round(s.tmax)}° · ${s.rain >= 0.3 ? s.rain.toFixed(1) + ' mm rain' : 'no rain'} · gusts ${Math.round(s.gust)}</b>${esc(s.verdict.join(' '))}</span></button>
+    ${day.boat ? `<label class="startrow boatrow ${day.tEnd > day.boat - 20 * 60e3 ? 'late' : ''}" for="boatTime"><span>Boat</span><input type="time" id="boatTime" value="${S.boat}"><span class="num">${day.tEnd > day.boat ? 'Your plan arrives after the boat. Start earlier.' : 'Water taxi from ' + esc(day.to.short) + '. Your plan has ' + durTxt((day.boat - day.tEnd) / W.HOUR) + ' spare.' + (day.boat - day.tEnd < 45 * 60e3 ? ' Start earlier if you can.' : '')}</span></label>` : ''}
+    <button class="verdict ${warn ? 'warn' : ''}" id="verdict" style="text-align:left">${W.icon(s.code, true)}<span>${s.none ? '<b>No forecast for this day yet</b>The forecast starts about 16 days before the day. Touch Update forecast in the Weather tab when you are nearer the date.' : `<b class="num">${Math.round(s.tmin)}° to ${Math.round(s.tmax)}° · ${s.rain >= 0.3 ? s.rain.toFixed(1) + ' mm rain' : 'no rain'} · gusts ${Math.round(s.gust)}</b>${esc(s.verdict.join(' '))}`}</span></button>
     ${profileSvg(day)}
     <div class="btns"><button class="btn pri" id="flyDay">Fly this day</button><button class="btn" id="showDay">Show on map</button><button class="btn" id="editPlan">${planOpen ? 'Close plan' : 'Change plan'}</button></div>
     ${plan}
-    ${day.guide ? `<h3 class="t">Know before you go</h3><ul class="notes">${day.guide.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+    ${notes.length ? `<h3 class="t">Know before you go</h3><ul class="notes">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
     <h3 class="t">On the way</h3>
     <ol class="list">${pois}</ol>
     ${FEAT.data ? `<p class="fine num">${FEAT.data.cross.filter(c => c.km >= day.fromKm && c.km <= day.toKm).length} mapped streams cross the track on this day. Zoom in on the map to see them as blue dots.</p>` : ''}
-    <div class="tonight"><b>${day.toId === 'anakiwa' ? 'Finish' : 'Tonight'}: ${esc(day.to.name)}</b><p>${esc(day.to.note)}</p></div>
-    <p class="fine">Times, facilities and route notes: Wilderness Guides route guide. Distances are measured on this map. Use Change plan if your lodges are different. Track line and places: OpenStreetMap contributors. Heights, Topo50 map and topo features: sourced from LINZ, CC BY 4.0.</p>`;
+    <div class="tonight"><b>${day.i === days.length - 1 ? 'Finish' : 'Tonight'}: ${esc(day.to.name)}</b><p>${esc(day.to.note || '')}</p></div>
+    <p class="fine">${QCT ? 'Times, facilities and route notes: Wilderness Guides route guide. Distances are measured on this map. Use Change plan if your lodges are different. Track line and places: OpenStreetMap contributors.' : 'Times are estimates from the distance and the climb. They are not DOC times. Distances are measured on this map. Track line: OpenStreetMap contributors. Huts and campsites: Department of Conservation, CC BY 4.0.'} Heights, Topo50 map and topo features: sourced from LINZ, CC BY 4.0.</p>`;
 }
 function wireDays() {
   const p = $('p-days');
@@ -352,8 +399,14 @@ function wireDays() {
     if (t.dataset.night !== undefined) {
       const n = +t.dataset.night;
       S.nights = S.nights.slice(0, n); if (t.value) S.nights.push(t.value);
-      save(); buildDays(); sel = Math.min(sel, days.length - 1);
-      buildStopMarkers(); drawRoutes(); updateHud(); renderAll(); buildTimebar(); applyEnv(); updateTimeUI(true);
+      replan();
+    }
+    if (t.id === 'planFrom' || t.id === 'planTo') { S.plan[t.id === 'planFrom' ? 'from' : 'to'] = t.value; replan(); }
+    if (t.id === 'planDate' && t.value) { S.date = t.value; DAY0 = W.dayStart(S.date); for (const c of S.checkins) c.day = Math.floor((c.t - DAY0) / W.DAYMS); replan(); }
+    if (t.id === 'planDir' && (t.value === '1') !== REV) { // the track data is put in the new direction when the app starts again
+      const a = planFrom(), b = planTo();
+      S.plan = { rev: !REV, from: b === END ? null : b, to: a === START ? null : a, redo: 1 }; S.nights.reverse();
+      saveNow(); location.reload();
     }
   });
   // Move a finger on the height profile to move a light on the map.
@@ -367,6 +420,13 @@ function wireDays() {
     svg.querySelector('#pread').textContent = kmTxt(d) + ' km · ' + Math.round(q.ele) + ' m';
   };
   p.addEventListener('pointerdown', move); p.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') move(e); });
+}
+function replan() { // the plan changed: days, markers, forecast frame
+  fixPlan(); buildDays(); sel = Math.min(sel, days.length - 1);
+  for (const c of S.checkins) if (days[c.day]) c.d = nearestOnDay(days[c.day], c.lat, c.lon).d;
+  const had = W.WX; wxFrame(); save();
+  buildStopMarkers(); drawRoutes(); updateHud(); renderAll(); buildTimebar(); applyEnv(); updateTimeUI(true);
+  if (W.WX !== had && navigator.onLine !== false) refreshWx(true);
 }
 function selectDay(i, fly = true) {
   sel = Math.max(0, Math.min(days.length - 1, i));
@@ -385,30 +445,31 @@ function renderSky() {
   for (let h = 5; h <= 22; h++) {
     const t = t0 + h * W.HOUR, w = W.wxAt(t, day.zone), dl = isDay(t), walk = t >= day.tStart - 1800e3 && t <= day.tEnd;
     const cur = Math.abs(simT - t) < 1800e3;
+    if (!w.inRange) { hrs += `<button class="hr num ${walk ? 'walk' : ''} ${dl ? '' : 'nt'} ${cur ? 'cur' : ''}" data-t="${t}" aria-label="${W.p2(h)}:00, no forecast"><span>${W.p2(h)}</span><b>–</b></button>`; continue; }
     hrs += `<button class="hr num ${walk ? 'walk' : ''} ${dl ? '' : 'nt'} ${cur ? 'cur' : ''}" data-t="${t}" aria-label="${W.p2(h)}:00, ${W.describe(w.code)}, ${Math.round(w.temp)} degrees">
       <span>${W.p2(h)}</span>${W.icon(w.code, dl)}<b>${Math.round(w.temp)}°</b>
       <span class="bar"><i style="height:${Math.min(100, w.rain / 3 * 100)}%"></i></span><span class="mm">${w.rain >= 0.1 ? w.rain.toFixed(1) : ''}</span>
       <span class="wd">${windArrow(w.dir)}</span><span>${Math.round(w.wind)}</span><span class="gu ${w.gust >= 60 ? 'hi' : ''}">${Math.round(w.gust)}</span></button>`;
   }
-  const sun = W.sunTimes(t0), f = Date.parse(W.WX.fetched);
+  const sun = W.sunTimes(t0), f = Date.parse(W.WX.fetched), noWx = !W.WX.fetched;
   $('p-sky').innerHTML = `
     <div class="pills">${pills}</div>
-    <div class="row" style="justify-content:space-between"><h2 class="t">${W.fmtDay(t0)} · ${['outer sound', 'ridge, 330 m', 'inner sound'][day.zone]}</h2></div>
+    <div class="row" style="justify-content:space-between"><h2 class="t">${W.fmtDay(t0)} · ${esc((ZONES[day.zone] || {}).name || '')}</h2></div>
     <div class="hours" id="hours">${hrs}</div>
     <p class="fine">Rows: hour, sky, °C, rain in mm, wind direction, wind and gusts in km/h. The pale band is your walk time. Touch an hour to see it on the map.</p>
     <p class="big num">Sunrise ${sun.rise ? W.fmtTime(sun.rise) : '–'} · Sunset ${sun.set ? W.fmtTime(sun.set) : '–'}</p>
-    <div class="row"><button class="btn" id="wxRefresh">Update forecast</button><span class="fine" style="flex:1">${esc(wxStatus || 'Forecast model: Open-Meteo. Read ' + W.fmtDay(f) + ' at ' + W.fmtTime(f) + '.')}</span></div>`;
+    <div class="row"><button class="btn" id="wxRefresh">Update forecast</button><span class="fine" style="flex:1">${esc(wxStatus || (noWx ? 'No forecast is stored for these dates. Touch Update forecast.' : 'Forecast model: Open-Meteo. Read ' + W.fmtDay(f) + ' at ' + W.fmtTime(f) + '.'))}</span></div>`;
   const cur = $('hours').querySelector('.walk'); if (cur) $('hours').scrollLeft = Math.max(0, cur.offsetLeft - 20);
 }
 async function refreshWx(silent) {
   if (!silent) { wxStatus = 'Reading the forecast…'; renderSky(); }
   try {
-    const w = await W.fetchLive();
+    const w = await W.fetchLive(ZONES, DAY0 - W.DAYMS, (days.length + 2) * 24);
     W.setWX(w); S.wx = w; save(); wxStatus = '';
     buildTimebar(); applyEnv(); updateTimeUI(true); renderAll();
     if (!silent) toast('Forecast updated');
   } catch (e) {
-    if (!silent) { wxStatus = 'Update failed. There is no connection to Open-Meteo from here. The stored forecast stays in use.'; renderSky(); }
+    if (!silent) { wxStatus = e && e.message === 'early' ? 'No forecast yet. Open-Meteo gives a forecast for the next 16 days only.' : e && e.message === 'old' ? 'These dates are too far in the past for the forecast service.' : 'Update failed. There is no connection to Open-Meteo from here. The stored forecast stays in use.'; renderSky(); }
   }
 }
 function wireSky() {
@@ -430,11 +491,13 @@ function nztm(lat, lon) {
   const N = 10000000 + k0 * (m + nu * sn * c * (w * w / 2 + w ** 4 / 24 * c * c * (4 * psi * psi + psi - t2) + w ** 6 / 720 * c ** 4 * (8 * psi ** 4 * (11 - 24 * t2) - 28 * psi ** 3 * (1 - 6 * t2) + psi * psi * (1 - 32 * t2) - psi * 2 * t2 + t2 * t2) + w ** 8 / 40320 * c ** 6 * (1385 - 3111 * t2 + 543 * t2 * t2 - t2 ** 3)));
   return { e: E, n: N };
 }
+// Topo50 sheets are 24 km wide and 36 km high. The rows have two letters, with no I and no O.
+const SHEET_ROWS = (() => { const L = 'ABCDEFGHJKLMNPQRSTUVWXYZ', out = []; for (const c of 'STUVWXYZ') out.push('A' + c); for (const c of L) out.push('B' + c); for (const c of 'ABCDEFGHJK') out.push('C' + c); return out; })();
 function gridRef(lat, lon) {
   const g = nztm(lat, lon), E = Math.round(g.e), N = Math.round(g.n);
-  const col = 28 + Math.floor((E - 1660000) / 24000), row = N >= 5442000 && N < 5478000 ? 'BP' : N >= 5406000 && N < 5442000 ? 'BQ' : '';
+  const col = 28 + Math.floor((E - 1660000) / 24000), row = SHEET_ROWS[Math.floor((6234000 - N) / 36000)] || '';
   const six = String(Math.floor(E / 100) % 1000).padStart(3, '0') + ' ' + String(Math.floor(N / 100) % 1000).padStart(3, '0');
-  return { E, N, sheet: row && col >= 26 && col <= 30 ? row + col : '', six };
+  return { E, N, sheet: row && col >= 4 && col <= 45 ? row + String(col).padStart(2, '0') : '', six };
 }
 function posText(lat, lon) {
   const g = gridRef(lat, lon);
@@ -449,6 +512,8 @@ const FEAT = { data: null, kinds: {
   homestead: { label: 'Homestead', far: 150, text: 'Homestead from the Topo50 data. This is private land.' },
   beacon: { label: 'Light', far: 220, text: 'Navigation light for boats.' }, wreck: { label: 'Wreck', far: 220, text: 'Shipwreck from the Topo50 data.' },
   waterfall_pt: { label: 'Waterfall', far: 150, text: 'Waterfall from the Topo50 data.' },
+  hut: { label: 'Hut', far: 150, text: 'Hut from the Topo50 data. It can be private or locked.' }, shelter: { label: 'Shelter', far: 120, text: 'Shelter from the Topo50 data.' },
+  monument: { label: 'Monument', far: 150, text: 'Monument from the Topo50 data.' }, historic_site: { label: 'Historic site', far: 150, text: 'Historic site from the Topo50 data.' },
   cross: { label: 'Stream', far: 60, text: 'A mapped stream crosses the track here. Small streams can be dry in summer. Treat water from streams before you drink it.' } } };
 function applyLayers(first) {
   const L = S.layers;
@@ -461,7 +526,7 @@ function applyLayers(first) {
   if (!first) drawFeatures();
 }
 async function loadFeatures() {
-  try { const r = await fetch('topofeat.json'); if (!r.ok) return; FEAT.data = await r.json(); } catch (e) { return; }
+  try { const r = await fetch(BASE + 'topofeat.json'); if (!r.ok) return; FEAT.data = await r.json(); for (const c of FEAT.data.cross) c.km = +G.planKm(c.km).toFixed(2); } catch (e) { return; }
   const d = FEAT.data, seg = list => { const out = []; for (const ln of list) for (let i = 0; i + 3 < ln.length; i += 2) { const a = G.world({ lon: ln[i], lat: ln[i + 1] }, 0.22), b = G.world({ lon: ln[i + 2], lat: ln[i + 3] }, 0.22); out.push(a.x, a.y, a.z, b.x, b.y, b.z); } return out; };
   scene.setFeatureLines([{ seg: seg(d.streams), color: '#7cc8ff', width: 1.3, opacity: 0.85 }, { seg: seg(d.roads), color: '#f4e7bd', width: 2, opacity: 0.9 }, { seg: seg(d.tracks), color: '#f4e7bd', width: 1.4, opacity: 0.9, dashed: true }]);
   scene.showFeatureLines(S.layers.feat && !S.layers.topo);
@@ -488,7 +553,7 @@ function showLayers() {
     html: `<span class="layrow"><b>Map</b>${sw('topo', L.topo, 'Topo50', 'Painted')}</span>
       <span class="layrow"><b>Contour lines</b>${sw('contours', L.contours, 'On', 'Off')}</span>
       <span class="layrow"><b>Topo features</b>${sw('feat', L.feat, 'On', 'Off')}</span>
-      <span class="facrow">Topo50 is the LINZ 1:50,000 map. It has its own contour lines, so the app draws its lines only on the painted map: a thin line each 20 m and a strong line each 100 m. Topo features are streams, roads, other tracks, wharves and spot heights. Zoom in to see them. Sourced from LINZ. CC BY 4.0.</span>` });
+      <span class="facrow">Topo50 is the LINZ 1:50,000 map. It has its own contour lines, so the app draws its lines only on the painted map: a thin line each ${PACK.geo.hmax > 1250 ? 50 : 20} m and a strong line each ${PACK.geo.hmax > 1250 ? 250 : 100} m. Topo features are streams, roads, other tracks, wharves and spot heights. Zoom in to see them. Sourced from LINZ. CC BY 4.0.</span>` });
 }
 
 // ---------- photos: read time and GPS, pin them to the trail
@@ -572,7 +637,7 @@ async function addPhotos(files) {
     if (PH.list.some(p => p.id === id)) { dup++; continue; }
     try {
       const x = await readExif(f), tm = exifTime(x, f), im = await shrink(f);
-      const p = { id, t: tm.t, exact: tm.exact, by, name: f.name, img: im.img, thumb: im.thumb };
+      const p = { id, walk: WALK.id, t: tm.t, exact: tm.exact, by, name: f.name, img: im.img, thumb: im.thumb };
       if (x.lat !== undefined) { p.glat = +x.lat.toFixed(6); p.glon = +x.lon.toFixed(6); gps++; }
       placePhoto(p); PH.mem.set(id, p); await pdbTx(st2 => st2.put(p));
       PH.list.push(p); PH.url[id] = URL.createObjectURL(p.thumb); ok++;
@@ -584,7 +649,7 @@ async function addPhotos(files) {
 }
 async function loadPhotos() {
   await pdbOpen();
-  PH.list = (await pdbAll()).sort((a, b) => a.t - b.t);
+  PH.list = (await pdbAll()).filter(p => (p.walk || 'qct') === WALK.id).sort((a, b) => a.t - b.t); // each walk has its own photos
   for (const p of PH.list) { placePhoto(p); try { PH.url[p.id] = URL.createObjectURL(p.thumb); } catch (e) { /* skip */ } }
   drawPhotos(); if (S.tab === 'photos' || S.tab === 'profile') renderAll();
   albumLoop(); albumSync(false);
@@ -702,7 +767,7 @@ async function albumSync(manual) {
     if (!r.ok) throw await sbErr(r);
     for (const x of await r.json()) {
       if ((S.hidePh || []).includes(x.id) || PH.list.some(p => p.remote === x.id)) continue;
-      const p = { id: 'r:' + x.id, remote: x.id, path: x.path, t: +x.t, exact: !!x.exact, by: x.by || '', album: 1 };
+      const p = { id: 'r:' + x.id, walk: WALK.id, remote: x.id, path: x.path, t: +x.t, exact: !!x.exact, by: x.by || '', album: 1 };
       if (typeof x.lat === 'number' && typeof x.lon === 'number') { p.glat = x.lat; p.glon = x.lon; }
       try { const tr = await fetch(sbFile(x.path + '_t.jpg')); if (!tr.ok) continue; p.thumb = await tr.blob(); } catch (e) { continue; }
       placePhoto(p); PH.mem.set(p.id, p); await pdbTx(st => st.put(p)); PH.list.push(p); PH.url[p.id] = URL.createObjectURL(p.thumb); added++;
@@ -836,8 +901,8 @@ function shareStart(code, name) {
 }
 function shareLoop() { clearInterval(SH.timer); if (S.share) SH.timer = setInterval(sharePoll, 60e3); }
 async function shareLink() {
-  const url = location.origin + location.pathname + '#join-' + S.share.code, text = 'Our Queen Charlotte Track map and photo album. Open this link to see where I am and to add your photos. Code: ' + prettyCode(S.share.code);
-  try { if (navigator.share) { await navigator.share({ title: 'Queen Charlotte Track 3D', text, url }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  const url = location.origin + location.pathname + (QCT ? '' : '?walk=' + WALK.id) + '#join-' + S.share.code, text = 'Our ' + WALK.name + ' map and photo album. Open this link to see where I am and to add your photos. Code: ' + prettyCode(S.share.code);
+  try { if (navigator.share) { await navigator.share({ title: WALK.name + ' 3D', text, url }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
   try { await navigator.clipboard.writeText(text + ' ' + url); toast('Link copied. Paste it into a message.', 4000); }
   catch (e) { showCard({ kindHtml: 'Share link', title: prettyCode(S.share.code), text: url, fly: false }); }
 }
@@ -904,7 +969,7 @@ function hrDisconnect() { HR.state = 'off'; HR.bpm = null; try { HR.dev && HR.de
 // ---------- Track me panel
 let watchId = null, gpsMsg = '', wake = null, manualD = null, wantFly = false, clearArmed = false;
 const BUILD = typeof __BUILD__ === 'string' ? __BUILD__ : 'dev';
-const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'heights.png', 'topofeat.json', 'topo.webp'];
+const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'heights.png', 'topofeat.json', 'topo.webp'].concat(BASE ? ['pack.json', WALK.ht || 'heights.png', 'topofeat.json', 'topo.webp'].concat(WALK.cover ? ['cover.png'] : []).map(f => BASE + f) : []);
 async function updateApp() {
   toast('Downloading the app again…', 8000);
   try {
@@ -933,7 +998,7 @@ function setMe(lat, lon, acc, src, forceDay, speed) {
     const day = days[ti], s = nearestOnDay(day, lat, lon);
     me = { lat, lon, acc, src, t, day: ti, d: s.d, off: s.off };
     if (src === 'gps' && s.off < 300) manualD = s.d;
-    if (src === 'manual' || (s.off < 300 && !(speed > 3.3))) { // not from a boat: near the route and at walk speed
+    if (src === 'manual' || (s.off < 300 && !(speed > (PADDLE ? 6 : 3.3)))) { // not from a boat: near the route and at walk speed
       const last = S.checkins[S.checkins.length - 1];
       if (src === 'manual' || !last || last.day !== ti || t - last.t > 40e3 || Math.abs(s.d - last.d) > 25) {
         const ci = { t, lat: +lat.toFixed(5), lon: +lon.toFixed(5), day: ti, d: Math.round(s.d), src: src === 'manual' ? 'm' : 'g' };
@@ -1013,7 +1078,7 @@ function renderTrack() {
       <div><b class="num">${pi && pi.mph ? (pi.mph / 1000).toFixed(1) : '–'}</b><span>km/h now</span></div>
       <div><b class="num">${pi && isToday ? W.fmtTime(pi.eta) : '–'}</b><span>at ${esc(day.to.short)}</span></div>
     </div>
-    ${day.boat && isToday ? (() => { const eta = pi ? pi.eta : day.tEnd, sp = (day.boat - eta) / 60e3; return `<p class="boatline ${sp < 20 ? 'late' : ''} num">${badge('boat')}Boat leaves Anakiwa at ${W.fmtTime(day.boat)}. ${sp >= 0 ? 'At this speed you have ' + durTxt(sp / 60) + ' spare.' : 'At this speed you are ' + durTxt(-sp / 60) + ' late. Call the office: ' + HELP.office + '.'}</p>`; })() : ''}
+    ${day.boat && isToday ? (() => { const eta = pi ? pi.eta : day.tEnd, sp = (day.boat - eta) / 60e3; return `<p class="boatline ${sp < 20 ? 'late' : ''} num">${badge('boat')}Boat leaves ${esc(day.to.short)} at ${W.fmtTime(day.boat)}. ${sp >= 0 ? 'At this speed you have ' + durTxt(sp / 60) + ' spare.' : 'At this speed you are ' + durTxt(-sp / 60) + ' late. Call the office: ' + HELP.office + '.'}</p>`; })() : ''}
     ${isToday && light !== null && light > 0 ? `<p class="fine num">Sunset is at ${W.fmtTime(sun.set)}. You have ${durTxt(light)} of daylight.</p>` : ''}
     <h3 class="t">Share my position</h3>
     <div id="shareBox" class="sharebox">${shareHtml()}</div>
@@ -1074,10 +1139,10 @@ function wireTrack() {
 const PF = { PX: 17, L: 30, R: 26, TOP: 92, PH: 104, B: 20 };
 function profilePlaces() {
   const out = [], seen = {};
-  const seq = ['shipcove', ...S.nights, 'anakiwa'];
+  const seq = planSeq();
   seq.forEach((id, n) => {
-    const d = n === 0 ? days[0] : days[n - 1], D = n === 0 ? 0 : d.off + d.dist;
-    out.push({ D, ele: n === 0 ? days[0].pts[0].ele : d.pts[d.pts.length - 1].ele, name: STOPS[id].short, fac: n === 0 ? ['boat', 'toilet'] : n === seq.length - 1 ? ['boat', 'toilet'] : ['lodge'], pri: 3, stop: id });
+    const d = n === 0 ? days[0] : days[n - 1], D = n === 0 ? 0 : d.off + d.dist, k = STOPS[id].kind;
+    out.push({ D, ele: n === 0 ? days[0].pts[0].ele : d.pts[d.pts.length - 1].ele, name: STOPS[id].short, fac: QCT ? (n === 0 || n === seq.length - 1 ? ['boat', 'toilet'] : ['lodge']) : k === 'hut' || k === 'camp' || k === 'lodge' ? [k] : [], pri: 3, stop: id });
   });
   for (const d of days) for (const e of d.pois) {
     if (seen[e.p.id] || e.p.kind === 'boat') continue; seen[e.p.id] = 1;
@@ -1087,9 +1152,9 @@ function profilePlaces() {
 }
 function renderProfile() {
   const { PX, L, R, TOP, PH: PHh, B } = PF, total = days.total, Wd = L + R + total / 1000 * PX, Hh = TOP + PHh + B;
-  const X = D => L + D / 1000 * PX, Y = e => TOP + PHh - Math.min(e, 500) / 500 * PHh;
+  const X = D => L + D / 1000 * PX, Y = e => TOP + PHh - Math.min(e, YMAX) / YMAX * PHh;
   let g = '';
-  for (const v of [0, 125, 250, 375, 500]) g += `<line x1="${L}" x2="${Wd - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,${v ? 0.09 : 0.25})"/>`;
+  for (const v of [0, YMAX / 4, YMAX / 2, YMAX * 3 / 4, YMAX]) g += `<line x1="${L}" x2="${Wd - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,${v ? 0.09 : 0.25})"/>`;
   for (let k = 0; k <= total / 1000; k += 5) g += `<text x="${X(k * 1000)}" y="${Hh - 5}" text-anchor="middle">${k} km</text><line x1="${X(k * 1000)}" x2="${X(k * 1000)}" y1="${TOP + PHh}" y2="${TOP + PHh + 4}" stroke="rgba(255,255,255,.4)"/>`;
   let areas = '';
   for (const d of days) {
@@ -1101,7 +1166,7 @@ function renderProfile() {
       <line x1="${X(d.off)}" x2="${X(d.off)}" y1="16" y2="${TOP + PHh}" stroke="rgba(255,255,255,.3)" stroke-dasharray="3 3"/>
       <rect x="${X(d.off) + 1}" y="0" width="${d.dist / 1000 * PX - 2}" height="15" rx="4" fill="${d.color}" fill-opacity="${d.i === sel ? 0.95 : 0.6}"/>
       <text x="${X(d.off) + 6}" y="11" style="fill:#1b1206;font-weight:700">Day ${d.i + 1} · ${W.fmtWd(d.date)} · ${kmTxt(d.dist)} km${d.guide ? ' · ' + d.guide.h[1] + ' h' : ''}${s.rain >= 1 ? ' · rain' : ''}${s.gust >= 70 ? ' · wind' : ''}</text>`;
-    for (const v of [250, 500]) areas += `<text x="${X(d.off) + 3}" y="${Y(v) - 2}" style="fill:rgba(236,244,240,.55)">${v} m</text>`;
+    for (const v of [YMAX / 2, YMAX]) areas += `<text x="${X(d.off) + 3}" y="${Y(v) - 2}" style="fill:rgba(236,244,240,.55)">${v} m</text>`;
   }
   // labels in three rows; a place with no free row keeps only its dot
   const places = profilePlaces().sort((a, b) => b.pri - a.pri || a.D - b.D), rows = [[], [], []], rowY = [30, 52, 74];
@@ -1122,11 +1187,11 @@ function renderProfile() {
   const meX = meD !== null ? `<line x1="${X(meD)}" x2="${X(meD)}" y1="${TOP - 6}" y2="${TOP + PHh}" stroke="#fff" stroke-width="1.5"/><circle cx="${X(meD)}" cy="${Y(posOnDay(days[me.day], me.d).ele)}" r="4.5" fill="#fff" stroke="#06181c"/><text x="${X(meD) + 5}" y="${TOP + PHh - 4}" style="fill:#fff;font-weight:700">You</text>` : '';
   const hi = Math.max(...days.flatMap(d => d.pts.map(p => p.ele)));
   $('p-profile').innerHTML = `
-    <p class="fine num" id="pfRead">Ship Cove to Anakiwa. Slide the profile sideways. Touch it to see that point on the map.</p>
+    <p class="fine num" id="pfRead">${esc(days[0].from.short)} to ${esc(days[days.length - 1].to.short)}. Slide the profile sideways. Touch it to see that point on the map.</p>
     <div class="hscroll" id="pfScroll"><svg class="profile wide" id="pfSvg" style="width:${Math.round(Wd)}px;height:${Hh}px" width="${Math.round(Wd)}" height="${Hh}" viewBox="0 0 ${Wd.toFixed(0)} ${Hh}" role="img" aria-label="Height profile of the whole track. Highest point ${Math.round(hi)} metres.">
       ${g}${areas}${marks}${meX}<line id="pfCur" x1="0" x2="0" y1="${TOP - 6}" y2="${TOP + PHh}" stroke="#9ff3e6" stroke-width="1.5" visibility="hidden"/></svg></div>
-    <div class="legend">${Object.keys(FAC).map(f => `<span>${badge(f)}${FAC[f].label}</span>`).join('')}</div>
-    <p class="fine num">${kmTxt(total)} km on this map, with the side tracks to your lodges. The official track length is 73.5 km. Heights are in metres above sea level. The printed route guide shows Anakiwa on the left. Here the profile runs in your walk direction.</p>`;
+    <div class="legend">${Object.keys(FAC).filter(f => QCT ? f !== 'hut' : f !== 'lodge' && f !== 'boat').map(f => `<span>${badge(f)}${FAC[f].label}</span>`).join('')}</div>
+    <p class="fine num">${kmTxt(total)} km on this map${QCT ? ', with the side tracks to your lodges' : ''}. ${WALK.km ? 'The official length is ' + WALK.km + ' km. ' : ''}Heights are in metres above sea level.${QCT ? ' The printed route guide shows Anakiwa on the left. Here the profile runs in your walk direction.' : ''}</p>`;
   const sc = $('pfScroll'), focus = meD !== null ? meD : days[sel].off;
   sc.scrollLeft = Math.max(0, X(focus) - 40);
 }
@@ -1138,18 +1203,30 @@ function wireProfile() {
     for (const d of days) if (D <= d.off + d.dist) { day = d; break; }
     const q = posOnDay(day, D - day.off), cur = $('pfCur'), x = PF.L + D / 1000 * PF.PX;
     cur.setAttribute('x1', x); cur.setAttribute('x2', x); cur.setAttribute('visibility', 'visible');
-    $('pfRead').textContent = `Day ${day.i + 1} · ${kmTxt(D)} km from Ship Cove · ${Math.round(q.ele)} m above sea level`;
+    $('pfRead').textContent = `Day ${day.i + 1} · ${kmTxt(D)} km from ${days[0].from.short} · ${Math.round(q.ele)} m above sea level`;
     if (day.i !== sel) { sel = day.i; drawRoutes(); updateHud(); }
     scene.setGhost(q); scene.flyTo({ x: q.x, z: q.z, y: q.y, dist: 52, polar: 1.0, az: Math.atan2(-q.hx, -q.hz), dur: 1200 });
   });
+}
+// ---------- the list of walks
+function showWalks() {
+  if (+$('sheet').dataset.open === 1) setSheet(0, true); // room for the list
+  const rows = PACK.walks.map(w => `<button class="walkrow ${w.id === WALK.id ? 'cur' : ''}" data-walk="${w.id}"><b>${esc(w.name)}</b><small class="num">${esc(w.region)} · ${w.km} km · ${esc(w.days)} days${w.mode === 'paddle' ? ' · by canoe' : ''}${w.id === WALK.id ? ' · open now' : ''}</small></button>`).join('');
+  showCard({ kindHtml: 'Walks', title: 'Select a walk', fly: false,
+    html: `<span class="walks">${rows}</span><span class="fine">Each walk has its own map pack of about 5 MB. The app downloads a pack the first time that you open the walk. After that, the walk works with no signal. Your plan, track and photos are kept for each walk.</span>` });
+}
+function openWalk(id) {
+  if (id === WALK.id) { hideCard(); return; }
+  saveNow(); try { localStorage.setItem('gw-walk', id); } catch (e) { /* ignore */ }
+  toast('Opening the walk…', 8000); location.href = location.pathname;
 }
 function showHelp() {
   showCard({ kindHtml: badge('boat') + 'Help', title: 'If something goes wrong', fly: false,
     html: `<ul class="notes">${HELP.lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>
       <span class="facrow posrow"><b>Your position</b><span class="num" id="helpPos">${me && me.src !== 'manual' ? esc(posText(me.lat, me.lon)) + ' · GPS ' + ago(me.t) : 'Touch the target button on the map to start GPS. Your grid reference then shows here.'}</span>${me && me.src !== 'manual' ? '<button class="btn" id="posCopy">Copy position</button>' : ''}</span>
-      <span class="facrow"><a class="btn pri" href="tel:111">Call 111</a> <a class="btn" href="tel:${HELP.office.replace(/ /g, '')}">Office ${HELP.office}</a></span>
+      <span class="facrow"><a class="btn pri" href="tel:111">Call 111</a> ${HELP.office ? `<a class="btn" href="tel:${HELP.office.replace(/ /g, '')}">${esc(HELP.officeName || 'Office')} ${HELP.office}</a>` : ''}</span>
       <span class="facrow"><button class="btn" id="updBtn2">Update app</button> App version: ${BUILD}</span>
-      <span class="facrow">Office from an overseas phone: ${HELP.officeIntl}. Luggage for the boat: 15 kg at most. There are no rubbish bins on the track: carry all waste out.</span>` });
+      <span class="facrow">${esc(HELP.foot || '')}</span>` });
 }
 
 // ---------- Spot panel
@@ -1337,8 +1414,8 @@ function layout() {
 
 function init() {
   if (!['days', 'profile', 'sky', 'track', 'photos', 'spot', 'replay'].includes(S.tab)) S.tab = 'days';
-  if (S.nights.some(id => !STOPS[id])) S.nights = DEFAULT_NIGHTS.slice();
-  buildDays(); sel = Math.min(sel, days.length - 1);
+  if (S.plan.redo) { delete S.plan.redo; for (const c of S.checkins) if (days[c.day]) c.d = nearestOnDay(days[c.day], c.lat, c.lon).d; save(); }
+  sel = Math.min(sel, days.length - 1);
   buildStaticMarkers(); buildStopMarkers(); buildMomentMarkers(); drawRoutes(); updateHud(); buildTimebar();
   wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile(); wireShare(); wirePhotos(); loadPhotos();
   if (!S.layers || typeof S.layers !== 'object') S.layers = { topo: false, contours: true, feat: true };
@@ -1359,6 +1436,10 @@ function init() {
     if (!S.share || S.share.code !== c) { S.share = { code: c, name: S.shareName || '', send: false, since: 0 }; S.peers = {}; S.tab = 'track'; save(); setTimeout(() => toast('You joined the share code. Write your name in the Track tab.', 6000), 1500); }
     try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
   }
+  if (location.search) { try { history.replaceState(null, '', location.pathname + location.hash); } catch (e) { /* ignore */ } }
+  $('walkBtn').addEventListener('click', showWalks);
+  if (PACK.failed) setTimeout(() => toast('The map pack for that walk did not load. There is no connection, or it is not on this phone yet.', 7000), 1200);
+  if (!W.WX.fetched && navigator.onLine !== false) refreshWx(true);
   wireSheet(); setTab(S.tab);
   if (S.sheet === 0 || S.sheet === -1) setSheet(S.sheet);
   applyEnv(); updateTimeUI(true); drawMe();
@@ -1375,6 +1456,7 @@ function init() {
     const t = e.target.closest('button'); if (!t) return;
     if (t.id === 'updBtn2') updateApp();
     else if (t.id === 'posCopy' && me) { try { await navigator.clipboard.writeText('My position: ' + posText(me.lat, me.lon) + ' (' + W.fmtDay(me.t) + ' ' + W.fmtTime(me.t) + ')'); toast('Position copied'); } catch (er) { toast('Copy did not work. Read the numbers from the card.'); } }
+    else if (t.dataset.walk) openWalk(t.dataset.walk);
     else if (t.dataset.lay) { const [k, v] = t.dataset.lay.split(':'); S.layers[k] = v === '1'; save(); applyLayers(); showLayers(); }
   });
   $('layBtn').addEventListener('click', showLayers);
@@ -1382,7 +1464,7 @@ function init() {
   if (window.ResizeObserver) new ResizeObserver(layout).observe($('sheet'));
   document.addEventListener('visibilitychange', async () => {
     if (!document.hidden && wake === null && $('wake') && $('wake').checked) { try { wake = await navigator.wakeLock.request('screen'); } catch (e) { /* ignore */ } }
-    if (!document.hidden && navigator.onLine !== false && Date.now() - Date.parse(W.WX.fetched) > 3 * W.HOUR) refreshWx(true);
+    if (!document.hidden && navigator.onLine !== false && !(Date.now() - Date.parse(W.WX.fetched) < 3 * W.HOUR)) refreshWx(true);
     if (!document.hidden) albumSync(false);
     if (!document.hidden && S.share) { sharePoll(); SH.lastPub = Math.min(SH.lastPub, Date.now() - 11 * 60e3); } // send again soon after the app comes back
   });
@@ -1417,6 +1499,6 @@ function init() {
     scene.tick(now, dt);
   }
   requestAnimationFrame(loop);
-  window.__qct = { scene, days, setTime, selectDay, setTab, startReplay, S, nztm, applyLayers };
+  window.__qct = { scene, get days() { return days; }, setTime, selectDay, setTab, startReplay, S, nztm, applyLayers };
 }
 init();

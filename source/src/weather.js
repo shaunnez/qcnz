@@ -1,15 +1,27 @@
-import WX0 from './wx.json';
-
-export const HOUR = 3600e3, DAYMS = 86400e3, TZ = 13 * HOUR; // NZDT
-const parseLocal = s => Date.parse(s.length === 16 ? s + ':00+13:00' : s);
-export let WX = WX0;
+// Weather, time and sun for the walk that is open.
+const PACK = globalThis.__PACK__ || {};
+export const HOUR = 3600e3, DAYMS = 86400e3;
+// New Zealand time: NZDT (UTC+13) from the last Sunday of September to the first Sunday of April, NZST (UTC+12) for the other months.
+export function tz(ts) {
+  const y = new Date(ts + 12 * HOUR).getUTCFullYear();
+  const apr = 1 + (7 - new Date(Date.UTC(y, 3, 1)).getUTCDay()) % 7, sep = 30 - new Date(Date.UTC(y, 8, 30)).getUTCDay();
+  const end = Date.UTC(y, 3, apr, 3) - 13 * HOUR, start = Date.UTC(y, 8, sep, 2) - 12 * HOUR;
+  return (ts < end || ts >= start ? 13 : 12) * HOUR;
+}
+// A New Zealand clock time ('2026-11-13T08:30') as a time stamp.
+export function parseLocal(s) { const u = Date.parse(s.slice(0, 16) + ':00Z'); return u - tz(u - 12.5 * HOUR); }
+export const dayStart = iso => parseLocal(iso + 'T00:00');
+const KEYS = ['temperature_2m', 'apparent_temperature', 'precipitation', 'precipitation_probability', 'cloud_cover', 'wind_speed_10m', 'wind_gusts_10m', 'wind_direction_10m', 'weather_code', 'uv_index'];
+// A forecast frame with no data: n hours from t0.
+export function blankWX(t0, n) { return { fetched: null, t0: isoLocal(t0), n, zones: [], blank: true }; }
+export let WX = PACK.wx || { fetched: null, t0: '2026-01-01T00:00', n: 24, zones: [], blank: true }; // the app sets the frame when it knows the dates
 export let T0 = parseLocal(WX.t0);
 export const tEnd = () => T0 + (WX.n - 1) * HOUR;
 export function setWX(w) { WX = w; T0 = parseLocal(w.t0); }
 
 // Date parts in New Zealand time, for any device time zone.
 export function nz(ts) {
-  const d = new Date(ts + TZ);
+  const d = new Date(ts + tz(ts));
   return { y: d.getUTCFullYear(), mo: d.getUTCMonth(), d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes(), wd: d.getUTCDay() };
 }
 const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -17,13 +29,17 @@ export const p2 = n => String(n).padStart(2, '0');
 export const fmtTime = ts => { const t = nz(ts); return p2(t.h) + ':' + p2(t.mi); };
 export const fmtDay = ts => { const t = nz(ts); return WD[t.wd] + ' ' + t.d + ' ' + MO[t.mo]; };
 export const fmtWd = ts => WD[nz(ts).wd];
+export const isoDate = ts => { const t = nz(ts); return t.y + '-' + p2(t.mo + 1) + '-' + p2(t.d); };
+function isoLocal(ts) { const t = nz(ts); return isoDate(ts) + 'T' + p2(t.h) + ':' + p2(t.mi); }
 
+const NO_WX = { inRange: false, temp: 13, feels: 13, rain: 0, prob: 0, cloud: 0.25, wind: 8, gust: 14, dir: 270, uv: 3, code: 1 };
 export function wxAt(ts, zone) {
   const z = WX.zones[Math.max(0, Math.min(WX.zones.length - 1, zone))];
   let f = (ts - T0) / HOUR;
   const inRange = f >= 0 && f <= WX.n - 1;
   f = Math.max(0, Math.min(WX.n - 1.001, f));
   const i = Math.floor(f), u = f - i;
+  if (!z || z.temperature_2m[i] == null) return NO_WX; // no forecast for this time
   const L = k => { const a = z[k][i] ?? 0, b = z[k][i + 1] ?? a; return a + (b - a) * u; };
   const a = z.wind_direction_10m[i] ?? 0, b = z.wind_direction_10m[i + 1] ?? a;
   const dd = ((b - a + 540) % 360) - 180;
@@ -73,7 +89,8 @@ export function icon(code, day = true) {
 }
 
 // Sun position. Azimuth is from north, clockwise. Angles in radians.
-export function sunPos(ts, lat = -41.17, lon = 174.08) {
+const PLACE = PACK.meta && PACK.meta.lat ? PACK.meta : { lat: -41.17, lon: 174.08 };
+export function sunPos(ts, lat = PLACE.lat, lon = PLACE.lon) {
   const rad = Math.PI / 180, d = ts / DAYMS - 0.5 + 2440588 - 2451545;
   const M = rad * (357.5291 + 0.98560028 * d);
   const C = rad * (1.9148 * Math.sin(M) + 0.02 * Math.sin(2 * M) + 0.0003 * Math.sin(3 * M));
@@ -101,7 +118,7 @@ export function sunTimes(dayStart) {
 export function summarize(t0, t1, zone) {
   const s = { tmin: 99, tmax: -99, rain: 0, prob: 0, gust: 0, wind: 0, uv: 0, cloud: 0, n: 0, firstRain: null, codes: {} };
   for (let t = t0; t <= t1; t += HOUR) {
-    const w = wxAt(t, zone);
+    const w = wxAt(t, zone); if (w === NO_WX) s.miss = (s.miss || 0) + 1;
     s.tmin = Math.min(s.tmin, w.temp); s.tmax = Math.max(s.tmax, w.temp); s.rain += w.rain;
     s.prob = Math.max(s.prob, w.prob); s.gust = Math.max(s.gust, w.gust); s.wind = Math.max(s.wind, w.wind);
     s.uv = Math.max(s.uv, w.uv); s.cloud += w.cloud; s.n++;
@@ -109,6 +126,7 @@ export function summarize(t0, t1, zone) {
     s.codes[w.code] = (s.codes[w.code] || 0) + 1;
   }
   s.cloud /= Math.max(s.n, 1);
+  s.none = !!s.miss && s.miss >= s.n / 2; // no forecast for most of this window
   s.code = +Object.keys(s.codes).sort((a, b) => s.codes[b] - s.codes[a])[0];
   if (s.rain >= 1) s.code = Math.max(...Object.keys(s.codes).map(Number).filter(c => c >= 51), s.code);
   const mid = wxAt((t0 + t1) / 2, zone);
@@ -126,17 +144,23 @@ export function summarize(t0, t1, zone) {
   return s;
 }
 
-const API = 'https://api.open-meteo.com/v1/forecast?latitude=-41.10,-41.19,-41.24&longitude=174.20,174.07,173.95&elevation=60,330,180&hourly=temperature_2m,apparent_temperature,precipitation,precipitation_probability,cloud_cover,wind_speed_10m,wind_gusts_10m,wind_direction_10m,weather_code,uv_index&timezone=Pacific%2FAuckland&start_date=2026-11-12&end_date=2026-11-18';
-export async function fetchLive() {
+const API = 'https://api.open-meteo.com/v1/forecast?hourly=' + KEYS.join(',') + '&timezone=Pacific%2FAuckland';
+// Read the forecast for the frame of n hours from t0. Hours with no forecast stay empty.
+export async function fetchLive(zones, t0, n) {
+  const now = Date.now(), a = Math.max(t0, now - 80 * DAYMS), b = Math.min(t0 + (n - 1) * HOUR, now + 15 * DAYMS);
+  if (b - a < 12 * HOUR) throw new Error(t0 > now ? 'early' : 'old');
+  const url = API + '&latitude=' + zones.map(z => z.lat).join(',') + '&longitude=' + zones.map(z => z.lon).join(',') + '&elevation=' + zones.map(z => Math.round(z.ele)).join(',') + '&start_date=' + isoDate(a) + '&end_date=' + isoDate(b);
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 12000);
   try {
-    const r = await fetch(API, { signal: ctl.signal, cache: 'no-store' });
+    const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const j = await r.json();
-    if (!Array.isArray(j) || j.length < 3 || !j[0].hourly) throw new Error('Unexpected data');
-    const keys = Object.keys(WX0.zones[0]);
-    const out = { fetched: new Date().toISOString(), t0: j[0].hourly.time[0], n: j[0].hourly.time.length, zones: j.map(z => { const o = {}; for (const k of keys) o[k] = z.hourly[k]; return o; }) };
-    if (out.n < 48) throw new Error('Unexpected data');
+    let j = await r.json(); if (!Array.isArray(j)) j = [j];
+    if (j.length < zones.length || !j[0].hourly) throw new Error('Unexpected data');
+    const first = parseLocal(j[0].hourly.time[0]), off = Math.round((first - t0) / HOUR), len = j[0].hourly.time.length;
+    const out = { fetched: new Date().toISOString(), t0: isoLocal(t0), n, zones: j.map(z => { const o = {};
+      for (const k of KEYS) { const src = z.hourly[k] || [], arr = new Array(n).fill(null); for (let i = 0; i < len; i++) if (i + off >= 0 && i + off < n) arr[i + off] = src[i]; o[k] = arr; }
+      return o; }) };
+    if (!out.zones[0].temperature_2m.some(v => v != null)) throw new Error('Unexpected data');
     return out;
   } finally { clearTimeout(timer); }
 }
