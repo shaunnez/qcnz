@@ -1261,15 +1261,73 @@ function wireReplay() {
 function renderAll() {
   if (S.tab === 'days') renderDays(); else if (S.tab === 'photos') renderPhotos(); else if (S.tab === 'profile') renderProfile(); else if (S.tab === 'sky') renderSky(); else if (S.tab === 'track') renderTrack(); else if (S.tab === 'spot') renderSpot(); else renderReplay();
 }
+function setSheet(v, anim) { // v: 1 open, 0 bar, -1 hidden (full-screen map)
+  const sheet = $('sheet'), h0 = sheet.offsetHeight, cur = +sheet.dataset.open;
+  if (v === cur) { if (anim) settle(sheet, 0); return; }
+  sheet.dataset.open = String(v); S.sheet = v; save();
+  $('grab').setAttribute('aria-expanded', v >= 0);
+  const h1 = sheet.offsetHeight; layout();
+  if (anim) settle(sheet, h1 - h0);
+}
+function settle(sheet, dh) { // continue from the finger position, then slide to the new position
+  const m = /translateY\(([-\d.]+)px\)/.exec(sheet.style.transform), from = (m ? +m[1] : 0) + dh;
+  sheet.classList.remove('drag', 'settle'); sheet.style.transform = `translateY(${from}px)`;
+  void sheet.offsetHeight; sheet.classList.add('settle'); sheet.style.transform = '';
+  setTimeout(() => sheet.classList.remove('settle'), 300);
+}
+function wireSheet() {
+  const sheet = $('sheet'), panels = $('panels');
+  let g = null;
+  const start = (x, y, target) => {
+    if (target.closest('#scrub')) return;
+    const inPanel = !!target.closest('#panels');
+    if (inPanel && panels.scrollTop > 0) return;
+    g = { x, y, dy: 0, on: false, inPanel, t: performance.now(), h: sheet.offsetHeight, grab: !!target.closest('#grab') };
+  };
+  const move = (x, y, ev) => {
+    if (!g) return;
+    const dx = x - g.x, dy = y - g.y;
+    if (g.inPanel && dy > 0 && ev && ev.cancelable) ev.preventDefault(); // the panel is at its top: the pull moves the sheet
+    if (!g.on) {
+      if (Math.abs(dy) < 9 || Math.abs(dy) < Math.abs(dx) * 1.3) { if (Math.abs(dx) > 14) g = null; return; }
+      if (g.inPanel && dy < 0) { g = null; return; } // the panel scrolls up as usual
+      g.on = true; sheet.classList.add('drag');
+    }
+    g.dy = dy;
+    if (ev && ev.cancelable) ev.preventDefault();
+    sheet.style.transform = `translateY(${dy > 0 ? Math.min(dy, g.h - 20) : Math.max(dy, -24) * 0.4}px)`;
+  };
+  const end = () => {
+    if (!g) return;
+    const { dy, on, h, grab } = g, v = +sheet.dataset.open, fast = performance.now() - g.t < 260; g = null;
+    if (!on) { if (grab) setSheet(v === -1 ? 1 : v === 1 ? 0 : -1, true); return; }
+    const lim = fast ? 24 : 56;
+    let nv = v;
+    if (dy > lim) nv = dy > h * 0.62 || v === 0 ? -1 : v === 1 ? 0 : -1;
+    else if (dy < -lim) nv = v === -1 ? (fast ? 1 : 0) : 1;
+    if (nv === v) settle(sheet, 0); else setSheet(nv, true);
+    sheet.dataset.noclick = String(performance.now());
+  };
+  sheet.addEventListener('touchstart', e => { if (e.touches.length === 1) start(e.touches[0].clientX, e.touches[0].clientY, e.target); else g = null; }, { passive: true });
+  sheet.addEventListener('touchmove', e => move(e.touches[0].clientX, e.touches[0].clientY, e), { passive: false });
+  sheet.addEventListener('touchend', end); sheet.addEventListener('touchcancel', end);
+  let mouse = false; // a mouse on a desktop computer
+  sheet.addEventListener('pointerdown', e => { if (e.pointerType === 'mouse' && e.button === 0) { mouse = true; start(e.clientX, e.clientY, e.target); } });
+  window.addEventListener('pointermove', e => { if (mouse && e.pointerType === 'mouse') move(e.clientX, e.clientY); });
+  window.addEventListener('pointerup', e => { if (mouse && e.pointerType === 'mouse') { mouse = false; end(); } });
+  // a drag must not also count as a touch on a tab or a button
+  sheet.addEventListener('click', e => { if (performance.now() - (+sheet.dataset.noclick || 0) < 350) { e.stopPropagation(); e.preventDefault(); } }, true);
+  $('grab').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); const v = +sheet.dataset.open; setSheet(v === -1 ? 1 : v === 1 ? 0 : -1, true); } });
+}
 function setTab(tab, toggle) {
-  const sheet = $('sheet');
-  if (toggle && S.tab === tab && sheet.dataset.open === '1') sheet.dataset.open = '0';
-  else sheet.dataset.open = '1';
+  const sheet = $('sheet'), was = +sheet.dataset.open;
+  const v = toggle && S.tab === tab && was === 1 ? 0 : 1;
   S.tab = tab; save();
   for (const b of $('tabs').children) b.setAttribute('aria-selected', b.dataset.tab === tab);
   for (const p of $('panels').children) p.hidden = p.id !== 'p-' + tab;
   if (tab !== 'track' && tab !== 'days' && tab !== 'profile') scene.setGhost(null);
-  renderAll(); $('panels').scrollTop = 0; layout();
+  renderAll(); $('panels').scrollTop = 0;
+  if (v !== was) setSheet(v, toggle); else layout();
 }
 function layout() {
   const sh = $('sheet').offsetHeight, top = document.querySelector('.hud').offsetHeight - 26;
@@ -1301,7 +1359,8 @@ function init() {
     if (!S.share || S.share.code !== c) { S.share = { code: c, name: S.shareName || '', send: false, since: 0 }; S.peers = {}; S.tab = 'track'; save(); setTimeout(() => toast('You joined the share code. Write your name in the Track tab.', 6000), 1500); }
     try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
   }
-  setTab(S.tab);
+  wireSheet(); setTab(S.tab);
+  if (S.sheet === 0 || S.sheet === -1) setSheet(S.sheet);
   applyEnv(); updateTimeUI(true); drawMe();
   if (S.share && window.crypto && crypto.subtle) { drawPeers(); shareLoop(); sharePoll(); } else if (S.share) S.share = null;
   window.addEventListener('online', () => { if (S.share) { sharePoll(); sharePublish(true); } albumSync(false); });

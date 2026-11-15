@@ -87,7 +87,16 @@ h1,h2,h3{text-wrap:balance}
 
 /* bottom sheet */
 .sheet{position:fixed;left:0;right:0;bottom:0;max-width:600px;margin:0 auto;background:var(--glass);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-top:1px solid var(--edge);border-radius:20px 20px 0 0;padding-bottom:var(--sab);display:flex;flex-direction:column;z-index:4}
-.timebar{padding:10px 14px 4px}
+.grab{height:22px;display:flex;align-items:center;justify-content:center;gap:8px;flex:none;cursor:grab;touch-action:none;width:100%}
+.grab i{width:44px;height:5px;border-radius:3px;background:rgba(255,255,255,.38)}
+.grab span{display:none;font-size:12.5px;font-weight:600;color:var(--mute)}
+.sheet[data-open="-1"] .grab{height:34px}
+.sheet[data-open="-1"] .grab span{display:inline}
+.sheet[data-open="-1"] .timebar,.sheet[data-open="-1"] .tabs,.sheet[data-open="-1"] .panels{display:none}
+.sheet.drag{transition:none}
+.sheet.settle{transition:transform .26s cubic-bezier(.2,.8,.2,1)}
+.timebar{padding:0 14px 4px}
+.tl,.tabs{touch-action:pan-x}
 .tl{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
 #timeLabel{font-weight:700;font-size:15px}
 #timeWx{color:var(--mute);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:right}
@@ -280,6 +289,7 @@ input[type=range].plain::-moz-range-thumb{width:18px;height:18px;border-radius:5
 </div>
 
 <section class="sheet" id="sheet" data-open="1">
+  <button class="grab" id="grab" aria-label="Move the menu up or down"><i></i><span id="grabTxt">Menu</span></button>
   <div class="timebar">
     <div class="tl"><button id="liveBtn" class="on">Now</button><span id="timeLabel" class="num"></span><span id="timeWx" class="num"></span></div>
     <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="Move through the forecast time">
