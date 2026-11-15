@@ -507,7 +507,7 @@ async function addPhotos(files) {
     } catch (e) { bad++; }
   }
   PH.busy = ''; PH.list.sort((a, b) => a.t - b.t);
-  drawPhotos(); renderAll();
+  drawPhotos(); renderAll(); albumSync(true);
   toast(ok + (ok === 1 ? ' photo' : ' photos') + ' added. ' + gps + ' with GPS, ' + (ok - gps) + ' placed by time.' + (dup ? ' ' + dup + ' already here.' : '') + (bad ? ' ' + bad + ' could not be read.' : ''), 6000);
 }
 async function loadPhotos() {
@@ -515,6 +515,7 @@ async function loadPhotos() {
   PH.list = (await pdbAll()).sort((a, b) => a.t - b.t);
   for (const p of PH.list) { placePhoto(p); try { PH.url[p.id] = URL.createObjectURL(p.thumb); } catch (e) { /* skip */ } }
   drawPhotos(); if (S.tab === 'photos' || S.tab === 'profile') renderAll();
+  albumLoop(); albumSync(false);
 }
 function drawPhotos() {
   scene.clearMarkers('photos');
@@ -535,7 +536,8 @@ function photoCaption(p) {
 function openPhoto(n) {
   const p = PH.list[n]; if (!p) return;
   PH.view = n; PH.armed = false;
-  if (!PH.big[p.id]) { try { PH.big[p.id] = URL.createObjectURL(p.img); } catch (e) { PH.big[p.id] = PH.url[p.id]; } }
+  if (!PH.big[p.id]) { try { PH.big[p.id] = p.img ? URL.createObjectURL(p.img) : p.path ? sbFile(p.path + '.jpg') : PH.url[p.id]; } catch (e) { PH.big[p.id] = PH.url[p.id]; } }
+  $('pvImg').onerror = () => { $('pvImg').onerror = null; $('pvImg').src = PH.url[p.id]; };
   $('pvImg').src = PH.big[p.id]; $('pvCap').textContent = photoCaption(p) + ' · ' + (n + 1) + ' of ' + PH.list.length;
   $('pvDel').textContent = 'Delete'; $('pvMap').disabled = p.lat === undefined || !G.inBounds(p.lat, p.lon);
   $('photoView').hidden = false;
@@ -551,10 +553,11 @@ function renderPhotos() {
   PH.list.forEach((p, n) => (p.day !== undefined && groups[p.day] ? groups[p.day] : other).items.push(n));
   const grid = g => g.items.length ? `<h3 class="t">${g.title} · ${g.items.length}</h3><div class="pgrid">${g.items.map(n => `<button data-ph="${n}" aria-label="Photo, ${esc(photoCaption(PH.list[n]))}"><img src="${PH.url[PH.list[n].id] || ''}" alt="" loading="lazy">${PH.list[n].pos === 'gps' ? '' : '<i></i>'}</button>`).join('')}</div>` : '';
   $('p-photos').innerHTML = `
+    ${albumHtml()}
     <div class="row"><button class="btn pri" id="phAdd">Add photos</button><input class="txt" id="phBy" maxlength="20" placeholder="Photos by (name)" value="${esc(S.photoBy || S.shareName || '')}" aria-label="Name of the person who made the photos"><input type="file" id="phInput" accept="image/*" multiple hidden></div>
     <p class="fine num" id="phStatus">${esc(PH.busy || (PH.list.length ? 'Photos: ' + PH.list.length + '. With a GPS position: ' + PH.list.filter(p => p.pos === 'gps').length + '. A dot on a photo shows that its position comes from the time.' : 'Add photos from this phone. The app reads the time and the GPS position in each photo and puts it on the map, the profile and Replay.'))}</p>
     ${groups.map(grid).join('')}${grid(other)}
-    <p class="fine">Photos stay on this phone, in a smaller size. For photos from friends: ask them to send the files with AirDrop, Quick Share or a shared album, write their name above, then add the files. WhatsApp and most chat apps remove the GPS position, so those photos are placed by time. On iPhone, touch Options in the photo picker and keep Location on.</p>
+    <p class="fine">${album() ? 'Each photo you add goes to the shared album in a smaller size. Each person with the link can see it and add photos. Delete removes a photo from this phone only.' : 'Photos stay on this phone, in a smaller size, until the shared album is on.'} Photos that come through WhatsApp or most chat apps have no GPS position, so the app places them by time. On iPhone, touch Options in the photo picker and keep Location on.</p>
     ${PH.list.length ? `<div class="btns"><button class="btn danger" id="phWipe">${PH.armed ? 'Touch again to delete all photos' : 'Delete all photos'}</button></div>` : ''}`;
 }
 function wirePhotos() {
@@ -563,10 +566,14 @@ function wirePhotos() {
     const b = e.target.closest('button'); if (!b) return;
     if (b.id !== 'phWipe') PH.armed = false;
     if (b.id === 'phAdd') $('phInput').click();
+    else if (b.id === 'albCode') { const a = crypto.getRandomValues(new Uint8Array(12)); shareStart([...a].map(x => CODE_CHARS[x % 32]).join(''), S.photoBy || S.shareName || ''); S.share.send = false; save(); albumLoop(); renderPhotos(); albumSync(true); shareLink(); }
+    else if (b.id === 'albSend') shareLink();
+    else if (b.id === 'albNow') albumSync(true);
     else if (b.dataset.ph !== undefined) openPhoto(+b.dataset.ph);
     else if (b.id === 'phWipe') {
       if (!PH.armed) { PH.armed = true; renderPhotos(); return; }
-      PH.armed = false; PH.list = []; PH.mem.clear(); pdbTx(st => st.clear()); drawPhotos(); renderPhotos(); toast('Photos deleted');
+      PH.armed = false; for (const q of PH.list) if (q.remote) (S.hidePh = S.hidePh || []).push(q.remote); save();
+      PH.list = []; PH.mem.clear(); pdbTx(st => st.clear()); drawPhotos(); renderPhotos(); toast('Photos deleted from this phone');
     }
   });
   p.addEventListener('change', e => {
@@ -582,10 +589,68 @@ function wirePhotos() {
     else if (b.id === 'pvMap' && p) { $('photoView').hidden = true; const w = G.world(p); if (p.day !== undefined && p.day !== sel) selectDay(p.day, false); scene.flyTo({ x: w.x, z: w.z, dist: 34, polar: 1.0, dur: 1300 }); }
     else if (b.id === 'pvDel' && p) {
       if (!PH.armed) { PH.armed = true; b.textContent = 'Touch again to delete'; return; }
-      PH.armed = false; PH.list.splice(PH.view, 1); PH.mem.delete(p.id); pdbTx(st => st.delete(p.id)); drawPhotos(); renderAll();
+      PH.armed = false; PH.list.splice(PH.view, 1); PH.mem.delete(p.id); pdbTx(st => st.delete(p.id)); if (p.remote) { (S.hidePh = S.hidePh || []).push(p.remote); save(); } drawPhotos(); renderAll();
       if (PH.list.length) openPhoto(Math.min(PH.view, PH.list.length - 1)); else $('photoView').hidden = true;
     }
   });
+}
+
+// ---------- shared album: photos in Supabase storage, one album for each share code
+// The key below is the public (publishable) key of the project. Row rules in the database limit what it can do.
+const SB = { url: 'https://eogjcbfnxvkpmptnbeyw.supabase.co', key: typeof __SBKEY__ === 'string' ? __SBKEY__ : '' };
+const ALB = { busy: false, status: '', err: '', last: 0, timer: 0 };
+const album = () => SB.url && SB.key && S.share && window.crypto && crypto.subtle ? SB : null;
+const sbHead = extra => Object.assign({ apikey: SB.key, Authorization: 'Bearer ' + SB.key }, extra || {});
+const sbFile = path => `${SB.url}/storage/v1/object/public/qct/${path}`;
+const cx = v => String(v).replace(/[^\w:.-]/g, '_').slice(0, 120);
+async function sbErr(r) { let m = 'HTTP ' + r.status; try { const j = await r.json(); m = j.message || j.error || m; } catch (e) { /* no body */ } return new Error(m); }
+async function albumUpload(p) {
+  const k = await shareKeys();
+  if (!p.path) { p.path = k.topic + '/' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); await pdbTx(st => st.put(p)); }
+  for (const [blob, suffix] of [[p.thumb, '_t.jpg'], [p.img, '.jpg']]) {
+    const r = await fetch(`${SB.url}/storage/v1/object/qct/${p.path}${suffix}`, { method: 'POST', headers: sbHead({ 'Content-Type': 'image/jpeg' }), body: blob });
+    if (!r.ok && r.status !== 409) { const e = await sbErr(r); if (!/exist|duplicate/i.test(e.message)) throw e; }
+  }
+  const row = { id: k.topic + ':' + cx(p.id), album: k.topic, t: p.t, exact: !!p.exact, by: (p.by || '').slice(0, 24), path: p.path };
+  if (p.glat !== undefined) { row.lat = p.glat; row.lon = p.glon; }
+  const r = await fetch(`${SB.url}/rest/v1/qct_photos`, { method: 'POST', headers: sbHead({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }), body: JSON.stringify(row) });
+  if (!r.ok && r.status !== 409) throw await sbErr(r);
+  p.remote = row.id; await pdbTx(st => st.put(p));
+}
+async function albumSync(manual) {
+  if (!album() || ALB.busy || (document.hidden && !manual)) return;
+  ALB.busy = true; ALB.err = ''; let added = 0, sent = 0;
+  const say = t => { ALB.status = t; const el = $('albStatus'); if (el) el.textContent = t; };
+  try {
+    const mine = PH.list.filter(p => !p.remote && p.img);
+    for (const p of mine) { say('Sending photo ' + (sent + 1) + ' of ' + mine.length + ' to the album…'); await albumUpload(p); sent++; }
+    say('Reading the album…');
+    const k = await shareKeys();
+    const r = await fetch(`${SB.url}/rest/v1/rpc/qct_list`, { method: 'POST', headers: sbHead({ 'Content-Type': 'application/json' }), body: JSON.stringify({ p_album: k.topic }) });
+    if (!r.ok) throw await sbErr(r);
+    for (const x of await r.json()) {
+      if ((S.hidePh || []).includes(x.id) || PH.list.some(p => p.remote === x.id)) continue;
+      const p = { id: 'r:' + x.id, remote: x.id, path: x.path, t: +x.t, exact: !!x.exact, by: x.by || '', album: 1 };
+      if (typeof x.lat === 'number' && typeof x.lon === 'number') { p.glat = x.lat; p.glon = x.lon; }
+      try { const tr = await fetch(sbFile(x.path + '_t.jpg')); if (!tr.ok) continue; p.thumb = await tr.blob(); } catch (e) { continue; }
+      placePhoto(p); PH.mem.set(p.id, p); await pdbTx(st => st.put(p)); PH.list.push(p); PH.url[p.id] = URL.createObjectURL(p.thumb); added++;
+    }
+    ALB.last = Date.now();
+  } catch (e) { ALB.err = /Failed to fetch|NetworkError|Load failed/i.test(String(e.message)) ? 'No connection to the album. The app tries again later.' : 'Album problem: ' + String(e.message); }
+  ALB.busy = false; ALB.status = '';
+  if (added || sent) { PH.list.sort((x, y) => x.t - y.t); drawPhotos(); }
+  if (added || sent || manual || ALB.err) { if (S.tab === 'photos' || S.tab === 'profile') renderAll(); }
+  if (added) toast(added + (added === 1 ? ' new photo' : ' new photos') + ' from the album', 4000);
+}
+function albumLoop() { clearInterval(ALB.timer); if (album()) ALB.timer = setInterval(() => albumSync(false), 120e3); }
+function albumHtml() {
+  if (!window.crypto || !crypto.subtle) return '';
+  if (!SB.key) return `<div class="tonight"><b>Shared album: not on yet</b><p>The online album is in preparation. Photos that you add now stay on this phone and go to the album when it is on.</p></div>`;
+  if (!S.share) return `<div class="tonight"><b>Shared album</b><p>Make a share code, or open the link from a friend. Each person with the code sees all photos and can add photos.</p><div class="btns" style="margin-top:8px"><button class="btn sea" id="albCode">Make a code</button></div></div>`;
+  const nAlb = PH.list.filter(p => p.remote).length, wait = PH.list.filter(p => !p.remote && p.img).length;
+  return `<div class="tonight"><b>Shared album is on · code ${prettyCode(S.share.code)}</b>
+    <p class="num" id="albStatus">${esc(ALB.status || ALB.err || (nAlb + ' photos in the album.' + (wait ? ' ' + wait + ' wait for a connection.' : '') + (ALB.last ? ' Last check ' + W.fmtTime(ALB.last) + '.' : '')))}</p>
+    <div class="btns" style="margin-top:8px"><button class="btn sea" id="albSend">Send the link</button><button class="btn" id="albNow">Check now</button></div></div>`;
 }
 
 // ---------- share positions with a code
@@ -695,10 +760,11 @@ function shareStart(code, name) {
   S.share = { code: cleanCode(code), name: (name || '').trim() || S.shareName || '', send: true, since: 0 };
   S.shareName = S.share.name; S.peers = {}; SH.seen = {}; SH.keys = null; SH.lastPub = 0; SH.status = ''; save();
   shareLoop(); sharePoll(); if (me && me.src !== 'manual') sharePublish(true);
+  albumLoop(); albumSync(true);
 }
 function shareLoop() { clearInterval(SH.timer); if (S.share) SH.timer = setInterval(sharePoll, 60e3); }
 async function shareLink() {
-  const url = location.origin + location.pathname + '#join-' + S.share.code, text = 'Follow me on the Queen Charlotte Track. Open this link, write your name and touch Join. Code: ' + prettyCode(S.share.code);
+  const url = location.origin + location.pathname + '#join-' + S.share.code, text = 'Our Queen Charlotte Track map and photo album. Open this link to see where I am and to add your photos. Code: ' + prettyCode(S.share.code);
   try { if (navigator.share) { await navigator.share({ title: 'Queen Charlotte Track 3D', text, url }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
   try { await navigator.clipboard.writeText(text + ' ' + url); toast('Link copied. Paste it into a message.', 4000); }
   catch (e) { showCard({ kindHtml: 'Share link', title: prettyCode(S.share.code), text: url, fly: false }); }
@@ -1163,7 +1229,7 @@ function init() {
   setTab(S.tab);
   applyEnv(); updateTimeUI(true); drawMe();
   if (S.share && window.crypto && crypto.subtle) { drawPeers(); shareLoop(); sharePoll(); } else if (S.share) S.share = null;
-  window.addEventListener('online', () => { if (S.share) { sharePoll(); sharePublish(true); } });
+  window.addEventListener('online', () => { if (S.share) { sharePoll(); sharePublish(true); } albumSync(false); });
 
   $('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab, true); });
   $('scrub').addEventListener('input', e => { R.playing = false; setTime(W.T0 + +e.target.value * 600e3, 'scrub'); if (S.tab === 'replay') renderReplay(); });
@@ -1177,6 +1243,7 @@ function init() {
   document.addEventListener('visibilitychange', async () => {
     if (!document.hidden && wake === null && $('wake') && $('wake').checked) { try { wake = await navigator.wakeLock.request('screen'); } catch (e) { /* ignore */ } }
     if (!document.hidden && navigator.onLine !== false && Date.now() - Date.parse(W.WX.fetched) > 3 * W.HOUR) refreshWx(true);
+    if (!document.hidden) albumSync(false);
     if (!document.hidden && S.share) { sharePoll(); SH.lastPub = Math.min(SH.lastPub, Date.now() - 11 * 60e3); } // send again soon after the app comes back
   });
   layout();
