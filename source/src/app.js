@@ -36,7 +36,7 @@ const kmTxt = m => (m / 1000).toFixed(1);
 const durTxt = h => { const m = Math.round(h * 60); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + W.p2(m % 60); };
 
 // ---------- saved data (this device only)
-const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {}, share: null, peers: {}, shareName: '', devId: '' }, (() => {
+const S = Object.assign({ nights: DEFAULT_NIGHTS.slice(), starts: DEFAULT_STARTS.slice(), boat: '16:00', checkins: [], moments: [], spotted: {}, wx: null, tab: 'days', said: {}, photoBy: '', share: null, peers: {}, shareName: '', devId: '' }, (() => {
   try {
     const cur = localStorage.getItem(KEY);
     if (cur) return JSON.parse(cur);
@@ -419,6 +419,175 @@ function wireSky() {
   });
 }
 
+// ---------- photos: read time and GPS, pin them to the trail
+const PH = { db: null, mem: new Map(), list: [], url: {}, big: {}, busy: '', view: -1, armed: false, flashT: 0 };
+const pdbOpen = () => new Promise(res => { try { const r = indexedDB.open('qcnz-photos', 1); r.onupgradeneeded = () => r.result.createObjectStore('p', { keyPath: 'id' }); r.onsuccess = () => { PH.db = r.result; res(); }; r.onerror = () => res(); } catch (e) { res(); } });
+const pdbAll = () => !PH.db ? Promise.resolve([...PH.mem.values()]) : new Promise(res => { try { const q = PH.db.transaction('p').objectStore('p').getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch (e) { res([]); } });
+const pdbTx = fn => !PH.db ? Promise.resolve() : new Promise(res => { try { const tx = PH.db.transaction('p', 'readwrite'); fn(tx.objectStore('p')); tx.oncomplete = res; tx.onerror = res; tx.onabort = res; } catch (e) { res(); } });
+async function readExif(file) {
+  const out = {};
+  try {
+    const buf = new DataView(await file.slice(0, 384 * 1024).arrayBuffer());
+    if (buf.byteLength < 12 || buf.getUint16(0) !== 0xFFD8) return out;
+    let o = 2;
+    while (o + 10 < buf.byteLength) {
+      const marker = buf.getUint16(o), size = buf.getUint16(o + 2);
+      if ((marker & 0xFF00) !== 0xFF00) break;
+      if (marker === 0xFFE1 && buf.getUint32(o + 4) === 0x45786966) {
+        const tiff = o + 10, le = buf.getUint16(tiff) === 0x4949, end = Math.min(buf.byteLength, o + 2 + size);
+        const u16 = q => buf.getUint16(q, le), u32 = q => buf.getUint32(q, le);
+        const ifd = (off, cb) => { const q = tiff + off; if (!off || q + 2 > end) return; const n = u16(q); for (let i = 0; i < n; i++) { const e = q + 2 + i * 12; if (e + 12 > end) return; cb(u16(e), u32(e + 4), e + 8); } };
+        const str = (count, vp) => { const q = count > 4 ? tiff + u32(vp) : vp; let t = ''; for (let i = 0; i < count - 1 && q + i < end; i++) t += String.fromCharCode(buf.getUint8(q + i)); return t; };
+        const dms = vp => { const q = tiff + u32(vp); if (q + 24 > end) return null; const r = i => u32(q + i * 8) / (u32(q + i * 8 + 4) || 1); return r(0) + r(1) / 60 + r(2) / 3600; };
+        let ex = 0, gp = 0;
+        ifd(u32(tiff + 4), (tag, count, vp) => { if (tag === 0x8769) ex = u32(vp); else if (tag === 0x8825) gp = u32(vp); else if (tag === 0x0132) out.dt0 = str(count, vp); });
+        ifd(ex, (tag, count, vp) => { if (tag === 0x9003) out.dt = str(count, vp); else if (tag === 0x9011) out.tz = str(count, vp); });
+        let latR, lonR, lat = null, lon = null;
+        ifd(gp, (tag, count, vp) => { if (tag === 1) latR = String.fromCharCode(buf.getUint8(vp)); else if (tag === 2) lat = dms(vp); else if (tag === 3) lonR = String.fromCharCode(buf.getUint8(vp)); else if (tag === 4) lon = dms(vp); });
+        if (lat !== null && lon !== null && (lat || lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) { out.lat = latR === 'S' ? -lat : lat; out.lon = lonR === 'W' ? -lon : lon; }
+        break;
+      }
+      o += 2 + size;
+    }
+  } catch (e) { /* no metadata */ }
+  return out;
+}
+function exifTime(x, file) {
+  const m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(x.dt || x.dt0 || '');
+  if (m) { const tz = /^[+-]\d\d:\d\d$/.test(x.tz || '') ? x.tz : '+13:00', t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${tz}`); if (!isNaN(t)) return { t, exact: true }; }
+  return { t: file.lastModified || Date.now(), exact: false };
+}
+async function shrink(file) {
+  let src;
+  try { src = await createImageBitmap(file); }
+  catch (e) { src = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = URL.createObjectURL(file); }); }
+  const draw = (from, max, q) => { const w = from.width, h = from.height, k = Math.min(1, max / Math.max(w, h)), c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k)); c.getContext('2d').drawImage(from, 0, 0, c.width, c.height); return new Promise(r => c.toBlob(b => r([b, c]), 'image/jpeg', q)); };
+  const [img, canvas] = await draw(src, 1400, 0.8), [thumb] = await draw(canvas, 260, 0.72);
+  if (!img || !thumb) throw new Error('decode');
+  return { img, thumb };
+}
+// Where was the walker at this time? Use the check-ins of that day, or the plan.
+function posAtTime(t) {
+  const i = dayOfTime(t); if (i === null) return null;
+  const day = days[i], cs = S.checkins.filter(c => c.day === i).sort((a, b) => a.t - b.t);
+  if (cs.length >= 2 && t >= cs[0].t - 15 * 60e3 && t <= cs[cs.length - 1].t + 15 * 60e3) {
+    if (t <= cs[0].t) return { day: i, d: cs[0].d }; if (t >= cs[cs.length - 1].t) return { day: i, d: cs[cs.length - 1].d };
+    let j = 0; while (j < cs.length - 2 && cs[j + 1].t < t) j++;
+    return { day: i, d: cs[j].d + (cs[j + 1].d - cs[j].d) * (t - cs[j].t) / Math.max(1, cs[j + 1].t - cs[j].t) };
+  }
+  const u = (t - day.tStart) / (day.tEnd - day.tStart);
+  return { day: i, d: Math.max(0, Math.min(1, u)) * day.dist };
+}
+function placePhoto(p) { // set day, distance on the route and map position
+  if (p.glat !== undefined) {
+    let i = dayOfTime(p.t), best = null;
+    for (const d of days) { const n = nearestOnDay(d, p.glat, p.glon); if (!best || (d.i === i ? n.off - 400 : n.off) < best.score) best = { day: d.i, d: n.d, off: n.off, score: d.i === i ? n.off - 400 : n.off }; }
+    p.lat = p.glat; p.lon = p.glon; p.pos = 'gps';
+    if (best && best.off < 600) { p.day = best.day; p.d = best.d; } else { p.day = i === null ? undefined : i; p.d = undefined; }
+  } else {
+    const q = posAtTime(p.t);
+    if (q) { const w = posOnDay(days[q.day], q.d); p.day = q.day; p.d = q.d; p.lat = w.lat; p.lon = w.lon; p.pos = 'time'; }
+    else { p.day = undefined; p.d = undefined; p.lat = undefined; p.lon = undefined; p.pos = 'none'; }
+  }
+}
+async function addPhotos(files) {
+  const by = ($('phBy') ? $('phBy').value.trim() : '') || S.photoBy || S.shareName || '';
+  S.photoBy = by; save();
+  let ok = 0, gps = 0, dup = 0, bad = 0, n = 0;
+  for (const f of files) {
+    PH.busy = 'Reading photo ' + (++n) + ' of ' + files.length + '…'; const st = $('phStatus'); if (st) st.textContent = PH.busy;
+    const id = (f.name + ':' + f.size + ':' + f.lastModified).replace(/[^\w:.-]/g, '_');
+    if (PH.list.some(p => p.id === id)) { dup++; continue; }
+    try {
+      const x = await readExif(f), tm = exifTime(x, f), im = await shrink(f);
+      const p = { id, t: tm.t, exact: tm.exact, by, name: f.name, img: im.img, thumb: im.thumb };
+      if (x.lat !== undefined) { p.glat = +x.lat.toFixed(6); p.glon = +x.lon.toFixed(6); gps++; }
+      placePhoto(p); PH.mem.set(id, p); await pdbTx(st2 => st2.put(p));
+      PH.list.push(p); PH.url[id] = URL.createObjectURL(p.thumb); ok++;
+    } catch (e) { bad++; }
+  }
+  PH.busy = ''; PH.list.sort((a, b) => a.t - b.t);
+  drawPhotos(); renderAll();
+  toast(ok + (ok === 1 ? ' photo' : ' photos') + ' added. ' + gps + ' with GPS, ' + (ok - gps) + ' placed by time.' + (dup ? ' ' + dup + ' already here.' : '') + (bad ? ' ' + bad + ' could not be read.' : ''), 6000);
+}
+async function loadPhotos() {
+  await pdbOpen();
+  PH.list = (await pdbAll()).sort((a, b) => a.t - b.t);
+  for (const p of PH.list) { placePhoto(p); try { PH.url[p.id] = URL.createObjectURL(p.thumb); } catch (e) { /* skip */ } }
+  drawPhotos(); if (S.tab === 'photos' || S.tab === 'profile') renderAll();
+}
+function drawPhotos() {
+  scene.clearMarkers('photos');
+  PH.list.forEach((p, n) => {
+    if (p.lat === undefined || !G.inBounds(p.lat, p.lon) || !PH.url[p.id]) return;
+    const w = G.world(p, 1.0), el = mkEl('photo', `<button aria-label="Photo"><img src="${PH.url[p.id]}" alt=""></button>`);
+    el.firstChild.addEventListener('click', () => openPhoto(n));
+    scene.addMarker({ el, ...w, pri: 30, far: 300, group: 'photos', w: 36, h: 36, noOcc: true });
+  });
+}
+function photoCaption(p) {
+  let c = W.fmtDay(p.t) + ' ' + W.fmtTime(p.t);
+  if (p.day !== undefined && p.d !== undefined) c += ' · day ' + (p.day + 1) + ', ' + kmTxt(p.d) + ' km';
+  c += p.pos === 'gps' ? ' · GPS position' : p.pos === 'time' ? ' · position from the time' : ' · no position';
+  if (p.by) c += ' · ' + p.by;
+  return c;
+}
+function openPhoto(n) {
+  const p = PH.list[n]; if (!p) return;
+  PH.view = n; PH.armed = false;
+  if (!PH.big[p.id]) { try { PH.big[p.id] = URL.createObjectURL(p.img); } catch (e) { PH.big[p.id] = PH.url[p.id]; } }
+  $('pvImg').src = PH.big[p.id]; $('pvCap').textContent = photoCaption(p) + ' · ' + (n + 1) + ' of ' + PH.list.length;
+  $('pvDel').textContent = 'Delete'; $('pvMap').disabled = p.lat === undefined || !G.inBounds(p.lat, p.lon);
+  $('photoView').hidden = false;
+}
+function photoFlash(p) {
+  const el = $('photoFlash'); if (!PH.url[p.id]) return;
+  $('pfImg').src = PH.url[p.id]; $('pfCap').textContent = W.fmtTime(p.t) + (p.by ? ' · ' + p.by : '');
+  el.hidden = false; el.classList.add('on'); clearTimeout(PH.flashT);
+  PH.flashT = setTimeout(() => { el.classList.remove('on'); setTimeout(() => { el.hidden = true; }, 400); }, 3600 / R.speed + 900);
+}
+function renderPhotos() {
+  const groups = days.map(d => ({ title: 'Day ' + (d.i + 1) + ' · ' + W.fmtDay(d.date), items: [] })); const other = { title: 'Other days and places', items: [] };
+  PH.list.forEach((p, n) => (p.day !== undefined && groups[p.day] ? groups[p.day] : other).items.push(n));
+  const grid = g => g.items.length ? `<h3 class="t">${g.title} · ${g.items.length}</h3><div class="pgrid">${g.items.map(n => `<button data-ph="${n}" aria-label="Photo, ${esc(photoCaption(PH.list[n]))}"><img src="${PH.url[PH.list[n].id] || ''}" alt="" loading="lazy">${PH.list[n].pos === 'gps' ? '' : '<i></i>'}</button>`).join('')}</div>` : '';
+  $('p-photos').innerHTML = `
+    <div class="row"><button class="btn pri" id="phAdd">Add photos</button><input class="txt" id="phBy" maxlength="20" placeholder="Photos by (name)" value="${esc(S.photoBy || S.shareName || '')}" aria-label="Name of the person who made the photos"><input type="file" id="phInput" accept="image/*" multiple hidden></div>
+    <p class="fine num" id="phStatus">${esc(PH.busy || (PH.list.length ? 'Photos: ' + PH.list.length + '. With a GPS position: ' + PH.list.filter(p => p.pos === 'gps').length + '. A dot on a photo shows that its position comes from the time.' : 'Add photos from this phone. The app reads the time and the GPS position in each photo and puts it on the map, the profile and Replay.'))}</p>
+    ${groups.map(grid).join('')}${grid(other)}
+    <p class="fine">Photos stay on this phone, in a smaller size. For photos from friends: ask them to send the files with AirDrop, Quick Share or a shared album, write their name above, then add the files. WhatsApp and most chat apps remove the GPS position, so those photos are placed by time. On iPhone, touch Options in the photo picker and keep Location on.</p>
+    ${PH.list.length ? `<div class="btns"><button class="btn danger" id="phWipe">${PH.armed ? 'Touch again to delete all photos' : 'Delete all photos'}</button></div>` : ''}`;
+}
+function wirePhotos() {
+  const p = $('p-photos');
+  p.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.id !== 'phWipe') PH.armed = false;
+    if (b.id === 'phAdd') $('phInput').click();
+    else if (b.dataset.ph !== undefined) openPhoto(+b.dataset.ph);
+    else if (b.id === 'phWipe') {
+      if (!PH.armed) { PH.armed = true; renderPhotos(); return; }
+      PH.armed = false; PH.list = []; PH.mem.clear(); pdbTx(st => st.clear()); drawPhotos(); renderPhotos(); toast('Photos deleted');
+    }
+  });
+  p.addEventListener('change', e => {
+    if (e.target.id === 'phInput' && e.target.files && e.target.files.length) addPhotos([...e.target.files]);
+    if (e.target.id === 'phBy') { S.photoBy = e.target.value.trim(); save(); }
+  });
+  $('photoView').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) { if (e.target.id === 'photoView') $('photoView').hidden = true; return; }
+    const p = PH.list[PH.view];
+    if (b.id === 'pvClose') $('photoView').hidden = true;
+    else if (b.id === 'pvPrev') openPhoto((PH.view - 1 + PH.list.length) % PH.list.length);
+    else if (b.id === 'pvNext') openPhoto((PH.view + 1) % PH.list.length);
+    else if (b.id === 'pvMap' && p) { $('photoView').hidden = true; const w = G.world(p); if (p.day !== undefined && p.day !== sel) selectDay(p.day, false); scene.flyTo({ x: w.x, z: w.z, dist: 34, polar: 1.0, dur: 1300 }); }
+    else if (b.id === 'pvDel' && p) {
+      if (!PH.armed) { PH.armed = true; b.textContent = 'Touch again to delete'; return; }
+      PH.armed = false; PH.list.splice(PH.view, 1); PH.mem.delete(p.id); pdbTx(st => st.delete(p.id)); drawPhotos(); renderAll();
+      if (PH.list.length) openPhoto(Math.min(PH.view, PH.list.length - 1)); else $('photoView').hidden = true;
+    }
+  });
+}
+
 // ---------- share positions with a code
 // Messages go through the public relay ntfy.sh. They are encrypted on the phone with a key made from the share code.
 const RELAY = 'https://ntfy.sh/', CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -779,11 +948,11 @@ function profilePlaces() {
   return out;
 }
 function renderProfile() {
-  const { PX, L, R, TOP, PH, B } = PF, total = days.total, Wd = L + R + total / 1000 * PX, Hh = TOP + PH + B;
-  const X = D => L + D / 1000 * PX, Y = e => TOP + PH - Math.min(e, 500) / 500 * PH;
+  const { PX, L, R, TOP, PH: PHh, B } = PF, total = days.total, Wd = L + R + total / 1000 * PX, Hh = TOP + PHh + B;
+  const X = D => L + D / 1000 * PX, Y = e => TOP + PHh - Math.min(e, 500) / 500 * PHh;
   let g = '';
   for (const v of [0, 125, 250, 375, 500]) g += `<line x1="${L}" x2="${Wd - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,${v ? 0.09 : 0.25})"/>`;
-  for (let k = 0; k <= total / 1000; k += 5) g += `<text x="${X(k * 1000)}" y="${Hh - 5}" text-anchor="middle">${k} km</text><line x1="${X(k * 1000)}" x2="${X(k * 1000)}" y1="${TOP + PH}" y2="${TOP + PH + 4}" stroke="rgba(255,255,255,.4)"/>`;
+  for (let k = 0; k <= total / 1000; k += 5) g += `<text x="${X(k * 1000)}" y="${Hh - 5}" text-anchor="middle">${k} km</text><line x1="${X(k * 1000)}" x2="${X(k * 1000)}" y1="${TOP + PHh}" y2="${TOP + PHh + 4}" stroke="rgba(255,255,255,.4)"/>`;
   let areas = '';
   for (const d of days) {
     const step = Math.max(1, Math.floor(d.pts.length / 200)); let line = '';
@@ -791,7 +960,7 @@ function renderProfile() {
     const last = d.pts[d.pts.length - 1]; line += 'L' + X(d.off + last.d).toFixed(1) + ' ' + Y(last.ele).toFixed(1);
     const s = W.summarize(d.tStart, d.tEnd, d.zone);
     areas += `<path d="${line}L${X(d.off + d.dist).toFixed(1)} ${Y(0)}L${X(d.off).toFixed(1)} ${Y(0)}Z" fill="${d.color}" fill-opacity="${d.i === sel ? 0.5 : 0.28}"/><path d="${line}" fill="none" stroke="${d.color}" stroke-width="1.8" stroke-linejoin="round"/>
-      <line x1="${X(d.off)}" x2="${X(d.off)}" y1="16" y2="${TOP + PH}" stroke="rgba(255,255,255,.3)" stroke-dasharray="3 3"/>
+      <line x1="${X(d.off)}" x2="${X(d.off)}" y1="16" y2="${TOP + PHh}" stroke="rgba(255,255,255,.3)" stroke-dasharray="3 3"/>
       <rect x="${X(d.off) + 1}" y="0" width="${d.dist / 1000 * PX - 2}" height="15" rx="4" fill="${d.color}" fill-opacity="${d.i === sel ? 0.95 : 0.6}"/>
       <text x="${X(d.off) + 6}" y="11" style="fill:#1b1206;font-weight:700">Day ${d.i + 1} · ${W.fmtWd(d.date)} · ${kmTxt(d.dist)} km${d.guide ? ' · ' + d.guide.h[1] + ' h' : ''}${s.rain >= 1 ? ' · rain' : ''}${s.gust >= 70 ? ' · wind' : ''}</text>`;
     for (const v of [250, 500]) areas += `<text x="${X(d.off) + 3}" y="${Y(v) - 2}" style="fill:rgba(236,244,240,.55)">${v} m</text>`;
@@ -810,13 +979,14 @@ function renderProfile() {
     }
     marks += `<circle cx="${x}" cy="${y}" r="${pl.pri === 3 ? 4 : 2.6}" fill="${pl.pri === 3 ? '#ffb454' : '#fff'}" stroke="#06181c"/>`;
   }
+  for (const ph of PH.list) if (ph.day !== undefined && ph.d !== undefined && days[ph.day]) marks += `<rect x="${(X(days[ph.day].off + ph.d) - 2.5).toFixed(1)}" y="${TOP + PHh - 7}" width="5" height="5" rx="1" fill="#fff" stroke="#06181c" stroke-width=".6"/>`;
   const meD = me && me.day !== null && days[me.day] ? days[me.day].off + me.d : null;
-  const meX = meD !== null ? `<line x1="${X(meD)}" x2="${X(meD)}" y1="${TOP - 6}" y2="${TOP + PH}" stroke="#fff" stroke-width="1.5"/><circle cx="${X(meD)}" cy="${Y(posOnDay(days[me.day], me.d).ele)}" r="4.5" fill="#fff" stroke="#06181c"/><text x="${X(meD) + 5}" y="${TOP + PH - 4}" style="fill:#fff;font-weight:700">You</text>` : '';
+  const meX = meD !== null ? `<line x1="${X(meD)}" x2="${X(meD)}" y1="${TOP - 6}" y2="${TOP + PHh}" stroke="#fff" stroke-width="1.5"/><circle cx="${X(meD)}" cy="${Y(posOnDay(days[me.day], me.d).ele)}" r="4.5" fill="#fff" stroke="#06181c"/><text x="${X(meD) + 5}" y="${TOP + PHh - 4}" style="fill:#fff;font-weight:700">You</text>` : '';
   const hi = Math.max(...days.flatMap(d => d.pts.map(p => p.ele)));
   $('p-profile').innerHTML = `
     <p class="fine num" id="pfRead">Ship Cove to Anakiwa. Slide the profile sideways. Touch it to see that point on the map.</p>
     <div class="hscroll" id="pfScroll"><svg class="profile wide" id="pfSvg" style="width:${Math.round(Wd)}px;height:${Hh}px" width="${Math.round(Wd)}" height="${Hh}" viewBox="0 0 ${Wd.toFixed(0)} ${Hh}" role="img" aria-label="Height profile of the whole track. Highest point ${Math.round(hi)} metres.">
-      ${g}${areas}${marks}${meX}<line id="pfCur" x1="0" x2="0" y1="${TOP - 6}" y2="${TOP + PH}" stroke="#9ff3e6" stroke-width="1.5" visibility="hidden"/></svg></div>
+      ${g}${areas}${marks}${meX}<line id="pfCur" x1="0" x2="0" y1="${TOP - 6}" y2="${TOP + PHh}" stroke="#9ff3e6" stroke-width="1.5" visibility="hidden"/></svg></div>
     <div class="legend">${Object.keys(FAC).map(f => `<span>${badge(f)}${FAC[f].label}</span>`).join('')}</div>
     <p class="fine num">${kmTxt(total)} km on this map, with the side tracks to your lodges. The official track length is 73.5 km. Heights are in metres above sea level. The printed route guide shows Anakiwa on the left. Here the profile runs in your walk direction.</p>`;
   const sc = $('pfScroll'), focus = meD !== null ? meD : days[sel].off;
@@ -889,6 +1059,7 @@ function showReplayFrame(dt, snap) {
   if (dt && f.d > R.lastD) {
     for (const e of f.seg.day.pois) if (e.d > R.lastD && e.d <= f.d && e.p.kind !== 'rest') toast(e.p.name, 2600);
     for (const m of S.moments) if (m.day === f.seg.day.i && m.d > R.lastD && m.d <= f.d) toast('“' + m.text + '”', 3400);
+    for (const ph of PH.list) if (ph.day === f.seg.day.i && ph.d !== undefined && ph.d > R.lastD && ph.d <= f.d) { photoFlash(ph); break; }
   }
   R.lastD = f.d;
   mode = 'replay'; simT = f.t;
@@ -949,7 +1120,7 @@ function wireReplay() {
 
 // ---------- shell
 function renderAll() {
-  if (S.tab === 'days') renderDays(); else if (S.tab === 'profile') renderProfile(); else if (S.tab === 'sky') renderSky(); else if (S.tab === 'track') renderTrack(); else if (S.tab === 'spot') renderSpot(); else renderReplay();
+  if (S.tab === 'days') renderDays(); else if (S.tab === 'photos') renderPhotos(); else if (S.tab === 'profile') renderProfile(); else if (S.tab === 'sky') renderSky(); else if (S.tab === 'track') renderTrack(); else if (S.tab === 'spot') renderSpot(); else renderReplay();
 }
 function setTab(tab, toggle) {
   const sheet = $('sheet');
@@ -968,11 +1139,11 @@ function layout() {
 }
 
 function init() {
-  if (!['days', 'profile', 'sky', 'track', 'spot', 'replay'].includes(S.tab)) S.tab = 'days';
+  if (!['days', 'profile', 'sky', 'track', 'photos', 'spot', 'replay'].includes(S.tab)) S.tab = 'days';
   if (S.nights.some(id => !STOPS[id])) S.nights = DEFAULT_NIGHTS.slice();
   buildDays(); sel = Math.min(sel, days.length - 1);
   buildStaticMarkers(); buildStopMarkers(); buildMomentMarkers(); drawRoutes(); updateHud(); buildTimebar();
-  wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile(); wireShare();
+  wireDays(); wireSky(); wireTrack(); wireSpot(); wireReplay(); wireProfile(); wireShare(); wirePhotos(); loadPhotos();
   $('helpBtn').addEventListener('click', showHelp);
   $('hrPill').addEventListener('click', () => setTab('track'));
   $('locBtn').addEventListener('click', () => {
