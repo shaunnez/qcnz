@@ -1,5 +1,5 @@
 // Offline cache for the Queen Charlotte Track app.
-const CACHE = 'qct-v12';
+const CACHE = 'qct-v13';
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'heights.png', 'topofeat.json', 'topo.webp'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

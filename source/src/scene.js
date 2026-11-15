@@ -263,7 +263,6 @@ export function createScene(canvas, labelRoot) {
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true; controls.dampingFactor = 0.09; controls.screenSpacePanning = false;
   controls.minDistance = 7; controls.maxDistance = 620; controls.minPolarAngle = 0.12; controls.maxPolarAngle = 1.43;
-  controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE };
   controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
   controls.zoomSpeed = 1.1; controls.rotateSpeed = 0.7;
   let lastTouch = -1e9, fly = null, idleOrbit = true;
@@ -279,6 +278,110 @@ export function createScene(canvas, labelRoot) {
     const o = camera.position.clone().sub(controls.target), r = o.length();
     return { r, theta: Math.atan2(o.x, o.z), phi: Math.acos(Math.max(-1, Math.min(1, o.y / r))) };
   }
+  // ---- touch gestures, as in a phone map app. One finger moves the map. Pinch zooms about the fingers.
+  // Twist turns the map. Two fingers up or down tilt. Double tap zooms in. Two-finger tap zooms out.
+  controls.touches = { ONE: -1, TWO: -1 };
+  const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), tp = new Map();
+  const gPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), gHit = new THREE.Vector3();
+  const clampN = (v, a, b) => Math.max(a, Math.min(b, v)), wrapA = a => ((a + 3 * Math.PI) % (2 * Math.PI)) - Math.PI;
+  function groundAt(cx, cy) { // the ground point below a screen point, or null near the horizon
+    const r = canvas.getBoundingClientRect();
+    ndc.set((cx - r.left) / r.width * 2 - 1, 1 - (cy - r.top) / r.height * 2);
+    camera.updateMatrixWorld(); ray.setFromCamera(ndc, camera);
+    gPlane.constant = -controls.target.y;
+    if (!ray.ray.intersectPlane(gPlane, gHit)) return null;
+    if (gHit.distanceTo(camera.position) > camera.position.distanceTo(controls.target) * 5) return null;
+    return gHit.clone();
+  }
+  function shiftView(dx, dz) { controls.target.x += dx; controls.target.z += dz; camera.position.x += dx; camera.position.z += dz; }
+  function zoomAbout(cx, cy, ratio, dAng) { // keep the ground point below (cx, cy) in its place on the screen
+    const A = groundAt(cx, cy), s = getSpherical();
+    setSpherical(controls.target, clampN(s.r * ratio, controls.minDistance, controls.maxDistance), s.theta + (dAng || 0), s.phi);
+    const B = A && groundAt(cx, cy);
+    if (A && B) shiftView(A.x - B.x, A.z - B.z);
+  }
+  let gs = null, vel = null, zoomAnim = null, lastTap = { t: 0, x: 0, y: 0 };
+  const two = () => { const [a, b] = [...tp.values()]; return { cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, d: Math.max(20, Math.hypot(a.x - b.x, a.y - b.y)), ang: Math.atan2(b.y - a.y, b.x - a.x), ay: a.y, by: b.y }; };
+  canvas.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return;
+    tp.set(e.pointerId, { x: e.clientX, y: e.clientY }); vel = null; zoomAnim = null;
+    const now = e.timeStamp;
+    if (tp.size === 1) gs = { n: 1, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: now, moved: false, hist: [] };
+    else if (tp.size === 2) { const s = two(); gs = { n: 2, ...s, d0: s.d, ang0: s.ang, cx0: s.cx, ay0: s.ay, by0: s.by, mode: '', rot: false, rotAcc: 0, t0: now }; }
+    else gs = null;
+  });
+  canvas.addEventListener('pointermove', e => {
+    const p = tp.get(e.pointerId); if (!p) return;
+    p.x = e.clientX; p.y = e.clientY;
+    if (!gs) return;
+    lastTouch = performance.now();
+    if (gs.n === 1 && tp.size === 1) {
+      if (!gs.moved) { if (Math.hypot(p.x - gs.x0, p.y - gs.y0) < 6) return; gs.moved = true; }
+      const a = groundAt(gs.x, gs.y), b = groundAt(p.x, p.y), s = getSpherical();
+      let dx, dz;
+      if (a && b) { dx = a.x - b.x; dz = a.z - b.z; }
+      else { // near the horizon: move in proportion to the finger
+        const k = 2 * s.r * Math.tan(camera.fov * Math.PI / 360) / viewH, mx = -(p.x - gs.x) * k, mf = (p.y - gs.y) * k / Math.max(0.3, Math.cos(s.phi));
+        dx = mx * Math.cos(s.theta) - mf * Math.sin(s.theta); dz = -mx * Math.sin(s.theta) - mf * Math.cos(s.theta);
+      }
+      const m = Math.hypot(dx, dz), lim = s.r * 0.6; if (m > lim) { dx *= lim / m; dz *= lim / m; }
+      shiftView(dx, dz);
+      const now = e.timeStamp; gs.hist.push({ t: now, dx, dz }); while (gs.hist.length && now - gs.hist[0].t > 110) gs.hist.shift();
+      gs.x = p.x; gs.y = p.y;
+    } else if (gs.n === 2 && tp.size === 2) {
+      const s = two();
+      if (!gs.mode) {
+        const dyA = s.ay - gs.ay0, dyB = s.by - gs.by0, dd = Math.abs(s.d - gs.d0), da = Math.abs(wrapA(s.ang - gs.ang0));
+        if (Math.abs(dyA) > 12 && Math.abs(dyB) > 12 && dyA * dyB > 0 && dd < Math.max(16, gs.d0 * 0.12) && da < 0.14 && Math.abs(s.cx - gs.cx0) < 22) gs.mode = 'tilt';
+        else if (dd > 12 || da > 0.14 || Math.abs(s.cx - gs.cx0) > 16) gs.mode = 'pz';
+        if (!gs.mode) return;
+      }
+      if (gs.mode === 'tilt') {
+        const q = getSpherical();
+        setSpherical(controls.target, q.r, q.theta, clampN(q.phi - (s.cy - gs.cy) * 0.0045, controls.minPolarAngle, controls.maxPolarAngle));
+      } else {
+        let dAng = wrapA(s.ang - gs.ang);
+        if (!gs.rot) { gs.rotAcc += dAng; dAng = 0; if (Math.abs(gs.rotAcc) > 0.16) gs.rot = true; } // a small twist during a pinch does not turn the map
+        const A = groundAt(gs.cx, gs.cy), q = getSpherical();
+        setSpherical(controls.target, clampN(q.r * gs.d / s.d, controls.minDistance, controls.maxDistance), q.theta + dAng, q.phi);
+        const B = A && groundAt(s.cx, s.cy);
+        if (A && B) { let dx = A.x - B.x, dz = A.z - B.z; const m = Math.hypot(dx, dz), lim = q.r * 0.6; if (m > lim) { dx *= lim / m; dz *= lim / m; } shiftView(dx, dz); }
+      }
+      gs.cx = s.cx; gs.cy = s.cy; gs.d = s.d; gs.ang = s.ang;
+    }
+  });
+  const touchUp = e => {
+    if (!tp.delete(e.pointerId)) return;
+    const now = e.timeStamp;
+    if (gs && gs.n === 1) {
+      if (gs.moved && gs.hist.length > 1 && now - gs.hist[gs.hist.length - 1].t < 60) {
+        const dt = Math.max(0.03, (gs.hist[gs.hist.length - 1].t - gs.hist[0].t) / 1000); let vx = 0, vz = 0;
+        for (const h of gs.hist.slice(1)) { vx += h.dx; vz += h.dz; }
+        vel = { x: vx / dt, z: vz / dt };
+      } else if (!gs.moved && e.type === 'pointerup' && now - gs.t0 < 300) {
+        if (now - lastTap.t < 330 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 44) { zoomAnim = { cx: e.clientX, cy: e.clientY, k: Math.log(0.5), u: 0 }; lastTap.t = 0; }
+        else lastTap = { t: now, x: e.clientX, y: e.clientY };
+      }
+      gs = null;
+    } else if (gs && gs.n === 2) {
+      if (!gs.mode && e.type === 'pointerup' && now - gs.t0 < 300) zoomAnim = { cx: gs.cx, cy: gs.cy, k: Math.log(2), u: 0 };
+      // one finger stays down: it continues to move the map
+      if (tp.size === 1) { const [q] = [...tp.values()]; gs = { n: 1, x: q.x, y: q.y, x0: q.x, y0: q.y, t0: -1e9, moved: true, hist: [] }; } else gs = null;
+    } else if (tp.size === 0) gs = null;
+  };
+  canvas.addEventListener('pointerup', touchUp); canvas.addEventListener('pointercancel', touchUp); canvas.addEventListener('lostpointercapture', touchUp);
+  function gestureTick(dt) {
+    if (vel) {
+      shiftView(vel.x * dt, vel.z * dt); const k = Math.exp(-dt * 4.2); vel.x *= k; vel.z *= k;
+      if (Math.hypot(vel.x, vel.z) < getSpherical().r * 0.02) vel = null;
+    }
+    if (zoomAnim) {
+      const u = Math.min(1, zoomAnim.u + dt / 0.28), e0 = 1 - Math.pow(1 - zoomAnim.u, 3), e1 = 1 - Math.pow(1 - u, 3);
+      zoomAbout(zoomAnim.cx, zoomAnim.cy, Math.exp(zoomAnim.k * (e1 - e0))); zoomAnim.u = u;
+      if (u >= 1) zoomAnim = null;
+    }
+  }
+
   const angLerp = (a, b, t) => a + ((((b - a) % (2 * Math.PI)) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) * t;
   function flyTo(o) {
     const s = getSpherical();
@@ -286,7 +389,7 @@ export function createScene(canvas, labelRoot) {
       t: 0, dur: o.dur || 1500, a: { target: controls.target.clone(), ...s },
       b: { target: new THREE.Vector3(o.x, o.y ?? G.groundY(o.x, o.z), o.z), r: o.dist ?? s.r, theta: o.az ?? s.theta, phi: o.polar ?? s.phi }
     };
-    idleOrbit = false;
+    idleOrbit = false; vel = null; zoomAnim = null;
     if (o.dur === 0) { setSpherical(fly.b.target, fly.b.r, fly.b.theta, fly.b.phi); controls.update(); fly = null; }
   }
   // Put a set of points in view. The first point is at the bottom of the screen.
@@ -489,7 +592,7 @@ export function createScene(canvas, labelRoot) {
       if (u >= 1) fly = null;
     } else if (idleOrbit) {
       const s = getSpherical(); setSpherical(controls.target, s.r, s.theta + dt * 0.02, s.phi);
-    }
+    } else gestureTick(dt);
     controls.update();
     // keep the target on the ground and inside the map, and the camera above the ground
     const t = controls.target;
@@ -527,6 +630,7 @@ export function createScene(canvas, labelRoot) {
   return {
     camera, controls, tick, setEnv, setSize, flyTo, frame, setRoutes, setWalked, setPeerTrails, setWalker, setGhost, addMarker, clearMarkers,
     addLodgeLight, clearLodgeLights, chase, getSpherical, setLayers, loadHeights, setFeatureLines, showFeatureLines,
+    groundAt,
     resetNorth() { const s = getSpherical(); flyTo({ x: controls.target.x, z: controls.target.z, az: 0, dur: 700, dist: s.r, polar: s.phi }); },
     azimuth() { return getSpherical().theta; },
     idle(v) { idleOrbit = v; },
